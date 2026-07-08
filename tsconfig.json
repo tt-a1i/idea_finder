@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/storage" },
+    { "path": "./packages/llm" },
+    { "path": "./packages/agents" },
+    { "path": "./packages/connectors" },
+    { "path": "./packages/harvest" },
+    { "path": "./packages/intelligence" },
+    { "path": "./packages/orchestration" }
+  ]
+}

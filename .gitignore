@@ -14,5 +14,7 @@ data/
 dist/
 build/
 node_modules/
+*.tsbuildinfo
+coverage/
 __pycache__/
 *.pyc

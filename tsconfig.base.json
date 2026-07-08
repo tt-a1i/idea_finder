@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "noEmitOnError": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "baseUrl": ".",
+    "paths": {
+      "@idea-finder/core": ["packages/core/src/index.ts"],
+      "@idea-finder/storage": ["packages/storage/src/index.ts"],
+      "@idea-finder/llm": ["packages/llm/src/index.ts"],
+      "@idea-finder/agents": ["packages/agents/src/index.ts"],
+      "@idea-finder/connectors": ["packages/connectors/src/index.ts"],
+      "@idea-finder/harvest": ["packages/harvest/src/index.ts"],
+      "@idea-finder/intelligence": ["packages/intelligence/src/index.ts"],
+      "@idea-finder/orchestration": ["packages/orchestration/src/index.ts"]
+    }
+  }
+}
