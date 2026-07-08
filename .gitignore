@@ -1,0 +1,18 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+.hive/
+
+# Temporary setup-review drafts; committed docs live under docs/agents.
+.scratch/setup-review/
+
+# App/runtime outputs for future implementation
+data/
+dist/
+build/
+node_modules/
+__pycache__/
+*.pyc
