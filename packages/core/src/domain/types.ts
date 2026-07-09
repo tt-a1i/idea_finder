@@ -10,6 +10,8 @@ import type {
   RawSignalId,
   ResearchRunId,
   SignalClusterId,
+  ValidationExperimentId,
+  MonitorScheduleId,
 } from "./ids.js";
 
 export type SourceTier = "L0" | "L1" | "L2" | "L3";
@@ -187,4 +189,89 @@ export interface ResearchRun {
   completedAt: string | null;
   configHash: string;
   errorMessage: string | null;
+}
+
+export type ValidationExperimentType =
+  | "mom_test"
+  | "landing"
+  | "community_test"
+  | "spike"
+  | "custom";
+
+export type ValidationExperimentStatus = "planned" | "running" | "completed" | "cancelled";
+
+export type ValidationOutcome = "validated" | "invalidated" | "inconclusive" | "blocked";
+
+export interface ValidationArtifact {
+  readonly id: string;
+  readonly kind: string;
+  readonly label: string;
+  readonly value: string;
+  readonly createdAt: string;
+}
+
+export interface ExperimentResultRecord {
+  readonly outcome: ValidationOutcome;
+  readonly summary: string;
+  readonly recordedAt: string;
+  readonly recordedBy: ActorKind;
+}
+
+export interface ValidationExperiment {
+  readonly id: ValidationExperimentId;
+  readonly opportunityId: OpportunityId;
+  readonly type: ValidationExperimentType;
+  readonly hypothesis: string;
+  readonly status: ValidationExperimentStatus;
+  readonly result: ExperimentResultRecord | null;
+  readonly artifacts: readonly ValidationArtifact[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type MonitorCadence = "manual" | "daily" | "weekly";
+
+export interface MonitorSchedule {
+  readonly id: MonitorScheduleId;
+  readonly briefId: HuntingTaskId;
+  readonly cadence: MonitorCadence;
+  readonly lastComparedRunId: ResearchRunId | null;
+  readonly enabled: boolean;
+  readonly createdAt: string;
+}
+
+export type MonitorDiffKind = "added" | "heated" | "cooled" | "unchanged";
+
+export interface MonitorOpportunitySnapshot {
+  readonly opportunityId: OpportunityId;
+  readonly clusterId: SignalClusterId;
+  readonly demandStatement: string;
+  readonly status: OpportunityStatus;
+  readonly confidence: ConfidenceLevel;
+  readonly evidenceCount: number;
+}
+
+export interface MonitorDiffEntry {
+  readonly kind: MonitorDiffKind;
+  readonly opportunityId: OpportunityId;
+  readonly clusterId: SignalClusterId;
+  readonly demandStatement: string;
+  readonly before: MonitorOpportunitySnapshot | null;
+  readonly after: MonitorOpportunitySnapshot | null;
+  readonly evidenceCountDelta: number;
+}
+
+export interface MonitorDiffSummary {
+  readonly added: number;
+  readonly heated: number;
+  readonly cooled: number;
+  readonly unchanged: number;
+}
+
+export interface MonitorDiff {
+  readonly baselineRunId: ResearchRunId;
+  readonly compareRunId: ResearchRunId;
+  readonly computedAt: string;
+  readonly entries: readonly MonitorDiffEntry[];
+  readonly summary: MonitorDiffSummary;
 }

@@ -1,1 +1,17 @@
 export * from "./ports/source-connector.js";
+export * from "./query-plan.js";
+export * from "./lib/fetch.js";
+export * from "./lib/normalize.js";
+export * from "./lib/chunking.js";
+export { chunkDocument } from "./lib/chunking.js";
+export * from "./lib/signal-detector.js";
+export { detectSignals } from "./lib/signal-detector.js";
+export * from "./lib/ids.js";
+export * from "./connectors/hn-algolia.js";
+export * from "./connectors/v2ex.js";
+export * from "./connectors/app-store-rss.js";
+export * from "./connectors/stack-exchange.js";
+export * from "./connectors/manual-import.js";
+export { createManualImportConnector } from "./connectors/manual-import.js";
+export * from "./l0-pack.js";
+export { connectorByPlatform } from "./l0-pack.js";

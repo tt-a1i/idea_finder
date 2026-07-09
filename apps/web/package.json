@@ -1,0 +1,30 @@
+{
+  "name": "@idea-finder/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:api\" \"npm run dev:ui\"",
+    "dev:ui": "vite",
+    "dev:api": "npm run build -w @idea-finder/workspace && tsc -p tsconfig.server.json && node --watch dist-server/dev.js",
+    "build": "tsc -p tsconfig.json --noEmit && vite build && tsc -p tsconfig.server.json",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "tsc -p tsconfig.server.json && vitest run"
+  },
+  "dependencies": {
+    "@idea-finder/workspace": "0.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.2",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}

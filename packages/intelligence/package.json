@@ -15,6 +15,6 @@
   },
   "dependencies": {
     "@idea-finder/core": "0.0.0",
-    "@idea-finder/llm": "0.0.0"
+    "@idea-finder/harvest": "0.0.0"
   }
 }

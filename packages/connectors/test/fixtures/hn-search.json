@@ -1,0 +1,12 @@
+{
+  "hits": [
+    {
+      "objectID": "12345",
+      "title": "Spreadsheet workaround is painful",
+      "url": "https://example.com/post",
+      "story_text": "I hate using Excel manually. Is there a tool for this? I would pay for a subscription.",
+      "author": "tester",
+      "created_at": "2024-01-15T10:00:00Z"
+    }
+  ]
+}

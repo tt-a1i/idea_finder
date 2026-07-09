@@ -12,5 +12,8 @@
   "scripts": {
     "build": "tsc --build",
     "typecheck": "tsc --build"
+  },
+  "dependencies": {
+    "@idea-finder/core": "0.0.0"
   }
 }

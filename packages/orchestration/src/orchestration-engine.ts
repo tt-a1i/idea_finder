@@ -1,4 +1,5 @@
 import type { ResearchRunId } from "@idea-finder/core";
+import type { QueryPlan } from "@idea-finder/connectors";
 import type { HarvestPipeline } from "@idea-finder/harvest";
 import type { IntelligencePipeline } from "@idea-finder/intelligence";
 
@@ -9,13 +10,13 @@ export interface OrchestrationEngineDeps {
 }
 
 export interface OrchestrationEngine {
-  startResearchRun(runId: ResearchRunId): Promise<void>;
+  startResearchRun(runId: ResearchRunId, queryPlan: QueryPlan): Promise<void>;
 }
 
 export function createOrchestrationEngine(deps: OrchestrationEngineDeps): OrchestrationEngine {
   return {
-    async startResearchRun(runId: ResearchRunId): Promise<void> {
-      await deps.harvest.runHarvest(runId);
+    async startResearchRun(runId: ResearchRunId, queryPlan: QueryPlan): Promise<void> {
+      await deps.harvest.runHarvest(runId, queryPlan);
       await deps.intelligence.run(runId);
     },
   };

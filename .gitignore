@@ -12,6 +12,7 @@
 # App/runtime outputs for future implementation
 data/
 dist/
+dist-server/
 build/
 node_modules/
 *.tsbuildinfo

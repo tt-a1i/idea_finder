@@ -15,10 +15,11 @@ export default defineConfig({
       "@idea-finder/harvest": path.join(rootDir, "packages/harvest/src/index.ts"),
       "@idea-finder/intelligence": path.join(rootDir, "packages/intelligence/src/index.ts"),
       "@idea-finder/orchestration": path.join(rootDir, "packages/orchestration/src/index.ts"),
+      "@idea-finder/workspace": path.join(rootDir, "packages/workspace/src/index.ts"),
     },
   },
   test: {
-    include: ["packages/**/*.test.ts", "packages/**/*.spec.ts"],
+    include: ["packages/**/*.test.ts", "packages/**/*.spec.ts", "apps/**/*.test.ts"],
     environment: "node",
   },
 });

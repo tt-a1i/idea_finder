@@ -8,6 +8,7 @@
     { "path": "./packages/connectors" },
     { "path": "./packages/harvest" },
     { "path": "./packages/intelligence" },
-    { "path": "./packages/orchestration" }
+    { "path": "./packages/orchestration" },
+    { "path": "./packages/workspace" }
   ]
 }

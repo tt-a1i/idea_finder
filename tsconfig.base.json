@@ -25,7 +25,8 @@
       "@idea-finder/connectors": ["packages/connectors/src/index.ts"],
       "@idea-finder/harvest": ["packages/harvest/src/index.ts"],
       "@idea-finder/intelligence": ["packages/intelligence/src/index.ts"],
-      "@idea-finder/orchestration": ["packages/orchestration/src/index.ts"]
+      "@idea-finder/orchestration": ["packages/orchestration/src/index.ts"],
+      "@idea-finder/workspace": ["packages/workspace/src/index.ts"]
     }
   }
 }

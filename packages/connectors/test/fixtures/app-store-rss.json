@@ -1,0 +1,14 @@
+{
+  "feed": {
+    "entry": [
+      {
+        "id": { "label": "review-1" },
+        "title": { "label": "Too expensive" },
+        "content": { "label": "Disappointed with the price hike. Wish it had offline mode." },
+        "author": { "name": { "label": "User1" } },
+        "updated": { "label": "2024-02-01T00:00:00Z" },
+        "link": { "attributes": { "href": "https://apps.apple.com/review/1" } }
+      }
+    ]
+  }
+}

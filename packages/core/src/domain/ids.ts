@@ -12,6 +12,8 @@ export type ResearchRunId = EntityId;
 export type HuntingTaskId = EntityId;
 export type SignalClusterId = EntityId;
 export type AgentRunId = EntityId;
+export type ValidationExperimentId = EntityId;
+export type MonitorScheduleId = EntityId;
 
 export function asId<T extends EntityId>(value: string): T {
   return value as T;

@@ -1,31 +1,17 @@
-import type { TaskScope } from "@idea-finder/core";
-
-export type AgentKind = "research" | "browser" | "computer" | "coding";
-
-export type AgentInvocationStatus = "succeeded" | "failed" | "blocked" | "partial";
-
-export interface AgentRequest {
-  readonly invocationId: string;
-  readonly kind: AgentKind;
-  readonly intent: string;
-  readonly scope: TaskScope;
-  readonly input: Record<string, unknown>;
-  readonly timeoutMs: number;
-}
-
-export interface AgentArtifactRef {
-  readonly kind: string;
-  readonly path: string;
-}
-
-export interface AgentResult {
-  readonly status: AgentInvocationStatus;
-  readonly artifacts: readonly AgentArtifactRef[];
-  readonly structured?: Record<string, unknown>;
-}
-
-export interface AgentConnector {
-  readonly kind: AgentKind;
-  readonly name: string;
-  invoke(request: AgentRequest): Promise<AgentResult>;
-}
+/** @deprecated Import from ../types/agent-contract.js — kept for backward-compatible re-export. */
+export type {
+  AgentArtifactRef,
+  AgentConnector,
+  AgentInputRef,
+  AgentInvocationStatus,
+  AgentKind,
+  AgentPlannedEffect,
+  AgentRequest,
+  AgentResult,
+  AgentScope,
+  AgentBudgets,
+  DomainEntity,
+  DomainWriteAction,
+  PlannedEffectKind,
+  PolicyDenial,
+} from "../types/agent-contract.js";

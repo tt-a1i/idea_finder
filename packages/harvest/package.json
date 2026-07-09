@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@idea-finder/connectors": "0.0.0",
-    "@idea-finder/core": "0.0.0",
-    "@idea-finder/storage": "0.0.0"
+    "@idea-finder/core": "0.0.0"
   }
 }

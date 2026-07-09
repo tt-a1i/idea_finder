@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@idea-finder/agents": "0.0.0",
+    "@idea-finder/connectors": "0.0.0",
     "@idea-finder/core": "0.0.0",
     "@idea-finder/harvest": "0.0.0",
     "@idea-finder/intelligence": "0.0.0",

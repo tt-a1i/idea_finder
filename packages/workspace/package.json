@@ -1,0 +1,29 @@
+{
+  "name": "@idea-finder/workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "idea-finder": "./dist/cli/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build",
+    "start": "node dist/cli/main.js"
+  },
+  "dependencies": {
+    "@idea-finder/agents": "0.0.0",
+    "@idea-finder/connectors": "0.0.0",
+    "@idea-finder/core": "0.0.0",
+    "@idea-finder/harvest": "0.0.0",
+    "@idea-finder/intelligence": "0.0.0",
+    "@idea-finder/orchestration": "0.0.0",
+    "@idea-finder/storage": "0.0.0"
+  }
+}
