@@ -1,4 +1,5 @@
 import { asId } from "./ids.js";
+import { randomUUID } from "node:crypto";
 import type { ValidationExperimentId } from "./ids.js";
 import type {
   ActorKind,
@@ -37,7 +38,7 @@ export function createValidationExperiment(
 
   const now = input.createdAt ?? new Date().toISOString();
   return {
-    id: asId<ValidationExperimentId>(`vexp_${input.opportunity.id}_${Date.now()}`),
+    id: asId<ValidationExperimentId>(`vexp_${input.opportunity.id}_${randomUUID()}`),
     opportunityId: input.opportunity.id,
     type: input.type,
     hypothesis,

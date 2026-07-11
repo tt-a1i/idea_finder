@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,7 @@ import {
   type CliMachineEnvelope,
 } from "../src/cli/contract.js";
 import { createMachineEnvelope } from "../src/cli/main.js";
+import { emptyWorkspaceState } from "../src/types.js";
 
 const exec = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
@@ -105,9 +106,9 @@ describe("installed standalone CLI", () => {
     const library = await invoke(executable, ["library", "--brief", "agents", "--workspace", workspace, "--json"], consumer);
     expectSuccess(library, "library");
     const opportunityId = (library.envelope.data as { opportunities: Array<{ id: string }> }).opportunities[0]!.id;
-    expectSuccess(await invoke(executable, ["board", "calibrate", opportunityId, "--action", "promote", "--workspace", workspace, "--json"], consumer), "board calibrate");
+    expectSuccess(await invoke(executable, ["board", "calibrate", opportunityId, "--action", "promote", "--run", runId, "--workspace", workspace, "--json"], consumer), "board calibrate");
 
-    const validation = await invoke(executable, ["validation", "add", opportunityId, "--type", "mom_test", "--hypothesis", "Users have this pain", "--start", "--workspace", workspace, "--json"], consumer);
+    const validation = await invoke(executable, ["validation", "add", opportunityId, "--type", "mom_test", "--hypothesis", "Users have this pain", "--run", runId, "--start", "--workspace", workspace, "--json"], consumer);
     expectSuccess(validation, "validation add");
     const experimentId = (validation.envelope.data as { experiment: { id: string } }).experiment.id;
     expectSuccess(await invoke(executable, ["validation", "list", "--opportunity", opportunityId, "--workspace", workspace, "--json"], consumer), "validation list");
@@ -121,6 +122,117 @@ describe("installed standalone CLI", () => {
     expectSuccess(agent, "agent create");
     const taskId = (agent.envelope.data as { task: { id: string } }).task.id;
     expectSuccess(await invoke(executable, ["agent", "run", taskId, "--workspace", workspace, "--json"], consumer), "agent run");
+
+    await expect(readFile(path.join(workspace, "state.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path.join(workspace, "state.json"), "not json", "utf8");
+    const restartedInspection = await invoke(executable, ["library", "inspect", opportunityId, "--run", runId, "--workspace", workspace, "--json"], consumer);
+    expect(restartedInspection.envelope).toMatchObject({
+      data: {
+        opportunity: { id: opportunityId, status: "promoted" },
+        calibrationEvents: [expect.objectContaining({ action: "promote" })],
+      },
+    });
+    const restartedValidations = await invoke(executable, ["validation", "list", "--opportunity", opportunityId, "--workspace", workspace, "--json"], consumer);
+    expect(restartedValidations.envelope).toMatchObject({ data: { experiments: [expect.objectContaining({ id: experimentId, status: "completed" })] } });
+    const restartedAgents = await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer);
+    expect(restartedAgents.envelope).toMatchObject({ data: { tasks: [expect.objectContaining({ id: taskId, status: "succeeded" })] } });
+
+    const canonicalDb = new DatabaseSync(path.join(workspace, "pipeline", "idea_finder.db"));
+    for (const table of ["calibration_events", "validation_experiments", "monitor_schedules", "monitor_comparisons", "agent_tasks"]) {
+      const count = (canonicalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+      expect(count, table).toBeGreaterThan(0);
+    }
+    canonicalDb.close();
+  });
+
+  it("migrates legacy decision JSON through the installed CLI and restarts without it", async () => {
+    const legacyWorkspace = path.join(consumer, "legacy-decision-workspace");
+    const created = await invoke(executable, ["brief", "create", "legacy-cli", "--title", "Legacy CLI", "--workspace", legacyWorkspace, "--json"], consumer);
+    expect(created.code).toBe(0);
+    const briefId = (created.envelope.data as { brief: { id: string } }).brief.id;
+    const researched = await invoke(executable, ["run", "legacy-cli", "--fixture", "--workspace", legacyWorkspace, "--json"], consumer);
+    const stored = researched.envelope.data as {
+      run: { id: string };
+      opportunities: Array<Record<string, unknown> & { id: string }>;
+    };
+    const base = stored.opportunities[0]!;
+    const opportunity = {
+      ...base,
+      status: "promoted",
+      provenance: { ...(base.provenance as object), promotedBy: "user" },
+    };
+    const calibration = {
+      id: "cal_legacy_cli",
+      opportunityId: opportunity.id,
+      actor: "user",
+      action: "promote",
+      note: "installed CLI migration",
+      occurredAt: "2026-07-11T01:00:00.000Z",
+    };
+    const experiment = {
+      id: "vexp_legacy_cli",
+      opportunityId: opportunity.id,
+      type: "mom_test",
+      hypothesis: "legacy CLI hypothesis",
+      status: "completed",
+      result: { outcome: "validated", summary: "legacy CLI outcome", recordedAt: "2026-07-11T01:00:02.000Z", recordedBy: "user" },
+      artifacts: [],
+      createdAt: "2026-07-11T01:00:01.000Z",
+      updatedAt: "2026-07-11T01:00:02.000Z",
+    };
+    const schedule = {
+      id: `mon_${briefId}`,
+      briefId,
+      cadence: "weekly",
+      lastComparedRunId: stored.run.id,
+      enabled: true,
+      createdAt: "2026-07-11T01:00:03.000Z",
+    };
+    const task = {
+      id: "agent_legacy_cli",
+      kind: "research",
+      intent: "legacy installed task",
+      status: "succeeded",
+      opportunityId: opportunity.id,
+      evidenceIds: [],
+      dryRun: false,
+      plannedEffects: [],
+      createdAt: "2026-07-11T01:00:04.000Z",
+      updatedAt: "2026-07-11T01:00:04.000Z",
+      invocations: [],
+    };
+    const databasePath = path.join(legacyWorkspace, "pipeline", "idea_finder.db");
+    const db = new DatabaseSync(databasePath);
+    db.exec(`
+      DELETE FROM compatibility_migrations WHERE id = 'legacy-decision-json-v2';
+      DELETE FROM calibration_events;
+      DELETE FROM validation_experiments;
+      DELETE FROM monitor_schedules;
+      DELETE FROM agent_tasks;
+    `);
+    db.close();
+    await writeFile(path.join(legacyWorkspace, "state.json"), `${JSON.stringify({
+      ...emptyWorkspaceState(),
+      runs: [stored],
+      opportunities: { [opportunity.id]: opportunity },
+      calibrationEvents: [calibration],
+      validationExperiments: { [experiment.id]: experiment },
+      monitorSchedules: { [schedule.id]: schedule },
+      agentTasks: { [task.id]: task },
+    })}\n`, "utf8");
+
+    const migrated = await invoke(executable, ["library", "inspect", opportunity.id, "--run", stored.run.id, "--workspace", legacyWorkspace, "--json"], consumer);
+    expect(migrated.code).toBe(0);
+    expect(migrated.envelope).toMatchObject({ data: { opportunity: { status: "promoted" }, calibrationEvents: [{ id: calibration.id }] } });
+    await rm(path.join(legacyWorkspace, "state.json"));
+    expect((await invoke(executable, ["validation", "list", "--opportunity", opportunity.id, "--workspace", legacyWorkspace, "--json"], consumer)).envelope)
+      .toMatchObject({ data: { experiments: [{ id: experiment.id, status: "completed" }] } });
+    expect((await invoke(executable, ["agent", "list", "--workspace", legacyWorkspace, "--json"], consumer)).envelope)
+      .toMatchObject({ data: { tasks: [{ id: task.id, status: "succeeded" }] } });
+    const restartedDb = new DatabaseSync(databasePath);
+    expect((restartedDb.prepare("SELECT COUNT(*) AS count FROM compatibility_migrations WHERE id = 'legacy-decision-json-v2'").get() as { count: number }).count).toBe(1);
+    expect((restartedDb.prepare("SELECT COUNT(*) AS count FROM monitor_schedules WHERE id = ?").get(schedule.id) as { count: number }).count).toBe(1);
+    restartedDb.close();
   });
 
   it("separates new scans from named retry/resume and isolates fixtures", async () => {
@@ -267,7 +379,13 @@ describe("installed standalone CLI", () => {
     expect(policy.envelope.errors[0]).toMatchObject({ category: "policy", code: "policy.domain_write_forbidden" });
 
     await writeFile(path.join(workspace, "state.json"), "not json", "utf8");
-    const internal = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    const ignoredJson = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    expect(ignoredJson.code).toBe(0);
+
+    const brokenWorkspace = path.join(consumer, "broken-sqlite");
+    await mkdir(path.join(brokenWorkspace, "pipeline"), { recursive: true });
+    await writeFile(path.join(brokenWorkspace, "pipeline", "idea_finder.db"), "not sqlite", "utf8");
+    const internal = await invoke(executable, ["workspace", "diagnostics", "--workspace", brokenWorkspace, "--json"], consumer);
     expect(internal.code).toBe(CLI_EXIT_CODES.internal);
     expect(internal.envelope.errors[0]).toMatchObject({ category: "internal", code: "internal.unexpected" });
   });

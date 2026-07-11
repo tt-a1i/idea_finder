@@ -1,4 +1,5 @@
 import { asId } from "./ids.js";
+import { randomUUID } from "node:crypto";
 import type { CalibrationEventId, ChunkId } from "./ids.js";
 import type {
   ActorKind,
@@ -101,7 +102,7 @@ export function applyCalibration(
     action === "promote" ? actor : opportunity.provenance.promotedBy;
 
   const event: CalibrationEvent = {
-    id: asId<CalibrationEventId>(`cal_${opportunity.id}_${Date.now()}`),
+    id: asId<CalibrationEventId>(`cal_${opportunity.id}_${randomUUID()}`),
     opportunityId: opportunity.id,
     actor,
     action,

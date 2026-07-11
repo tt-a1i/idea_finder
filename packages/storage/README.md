@@ -40,6 +40,8 @@ storage.close();
 - `huntingBriefs`, `researchRunConfigs` — canonical Briefs and effective run configuration snapshots
 - `rawDocuments`, `chunks`, `rawSignals`, `evidenceItems`, `opportunityDrafts`, `opportunities`, `calibrationEvents` — run-scoped JSON payloads
 - `libraryAdmissionResults`, `sourceStatuses` — admitted/rejected outcomes and source execution state
+- `calibrationEvents` — append-only Decision Board history scoped by ResearchRun
+- `validationExperiments`, `monitorSchedules`, `monitorComparisons`, `agentTasks` — canonical runtime state
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

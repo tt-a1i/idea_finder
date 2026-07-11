@@ -51,8 +51,8 @@ Usage:
   idea-finder library [--brief <slug>]
   idea-finder library inspect <opportunityId> [--run <runId>]
   idea-finder library rejected --run <runId>
-  idea-finder board calibrate <opportunityId> --action <promote|reject|park|needs_more_evidence> [--note <text>]
-  idea-finder validation add <opportunityId> --type <mom_test|landing|community_test|spike|custom> --hypothesis <text> [--start]
+  idea-finder board calibrate <opportunityId> --action <promote|reject|park|needs_more_evidence> [--run <runId>] [--note <text>]
+  idea-finder validation add <opportunityId> --type <mom_test|landing|community_test|spike|custom> --hypothesis <text> [--run <runId>] [--start]
   idea-finder validation list [--opportunity <id>]
   idea-finder validation complete <experimentId> --outcome <validated|invalidated|inconclusive|blocked> --summary <text>
   idea-finder monitor diff --brief <slug> --baseline <runId> --compare <runId>
@@ -139,8 +139,8 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   library: { valueFlags: ["--brief"], positionalCount: 1 },
   "library inspect": { valueFlags: ["--run"], positionalCount: 3 },
   "library rejected": { valueFlags: ["--run"], positionalCount: 2 },
-  "board calibrate": { valueFlags: ["--action", "--note"], positionalCount: 3 },
-  "validation add": { valueFlags: ["--type", "--hypothesis"], booleanFlags: ["--start"], positionalCount: 3 },
+  "board calibrate": { valueFlags: ["--action", "--note", "--run"], positionalCount: 3 },
+  "validation add": { valueFlags: ["--type", "--hypothesis", "--run"], booleanFlags: ["--start"], positionalCount: 3 },
   "validation list": { valueFlags: ["--opportunity"], positionalCount: 2 },
   "validation complete": { valueFlags: ["--outcome", "--summary"], positionalCount: 3 },
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
@@ -288,7 +288,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   if (cmd === "board" && sub === "calibrate") {
     const opportunityId = required(rest[0], "board.opportunity_required", "board calibrate requires <opportunityId>");
     const action = oneOf(required(flag(rest, "--action"), "board.action_required", "--action is required"), ACTIONS, "action") as CalibrationAction;
-    const result = await svc(workspaceDir).applyBoardCalibration({ opportunityId, action, note: flag(rest, "--note") ?? null });
+    const result = await svc(workspaceDir).applyBoardCalibration({ opportunityId, action, note: flag(rest, "--note") ?? null, runId: flag(rest, "--run") as never });
     return { command: "board calibrate", data: result, human: `Calibrated ${result.opportunity.id} → ${result.opportunity.status}` };
   }
 
@@ -296,7 +296,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const opportunityId = required(rest[0], "validation.opportunity_required", "validation add requires <opportunityId>");
     const type = oneOf(required(flag(rest, "--type"), "validation.type_required", "--type is required"), EXPERIMENT_TYPES, "type") as ValidationExperimentType;
     const hypothesis = required(flag(rest, "--hypothesis"), "validation.hypothesis_required", "--hypothesis is required");
-    const experiment = await svc(workspaceDir).createValidationExperiment({ opportunityId, type, hypothesis, start: has(rest, "--start") });
+    const experiment = await svc(workspaceDir).createValidationExperiment({ opportunityId, type, hypothesis, runId: flag(rest, "--run") as never, start: has(rest, "--start") });
     return { command: "validation add", data: { experiment }, human: `Created validation ${experiment.id} (${experiment.status}) for ${opportunityId}` };
   }
 

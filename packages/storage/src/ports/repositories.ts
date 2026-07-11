@@ -35,7 +35,11 @@ export type RawSignalRepository = RunScopedRepository<RawSignal>;
 export type EvidenceItemRepository = RunScopedRepository<EvidenceItem>;
 export type OpportunityDraftRepository = RunScopedRepository<OpportunityDraft>;
 export type OpportunityRepository = RunScopedRepository<Opportunity>;
-export type CalibrationEventRepository = RunScopedRepository<CalibrationEvent>;
+export interface CalibrationEventRepository {
+  append(runId: ResearchRunId, event: CalibrationEvent): void;
+  get(runId: ResearchRunId, id: string): CalibrationEvent | null;
+  listByRun(runId: ResearchRunId): CalibrationEvent[];
+}
 
 export interface PipelineStepStore {
   isComplete(runId: ResearchRunId, step: string): boolean;

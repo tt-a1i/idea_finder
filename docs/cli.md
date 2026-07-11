@@ -91,10 +91,12 @@ Normal `run` execution uses the real local pipeline under `<workspace>/pipeline/
 The same SQLite database is canonical for Briefs, ResearchRuns, effective
 configuration, harvested documents, chunks, signals, evidence, drafts,
 admission outcomes, source status, and Opportunity Library reads. Existing
-`briefs/*.json` and research fields in `state.json` are imported idempotently on
-first access; conflicting Brief identities fail closed instead of being silently
-overwritten. Decision, validation, and monitor state remains on the compatibility
-path until its dedicated migration.
+`briefs/*.json` and supported fields in `state.json` are imported by one-time,
+transactional compatibility migrations; conflicts and orphan references fail
+closed before the migration marker is written. After migration, JSON is not read
+or written as runtime state. Calibration events are append-only, while validation
+experiments, agent tasks, monitor schedules, and monitor comparison metadata use
+the same canonical SQLite database.
 
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an

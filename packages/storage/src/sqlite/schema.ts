@@ -42,6 +42,26 @@ CREATE TABLE IF NOT EXISTS compatibility_migrations (
   payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS validation_experiments (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS monitor_schedules (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS monitor_comparisons (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_documents (
   id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,

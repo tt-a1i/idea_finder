@@ -34,6 +34,7 @@ import type {
 import { createPipelineStepStore } from "./sqlite/pipeline-step-store.js";
 import { createJsonEntityRepository } from "./sqlite/json-entity-repository.js";
 import { createHuntingBriefRepository } from "./sqlite/hunting-brief-repository.js";
+import { createCalibrationEventRepository } from "./sqlite/calibration-event-repository.js";
 import { createResearchRunRepository } from "./sqlite/research-run-repository.js";
 import { createRunScopedRepository } from "./sqlite/run-scoped-repository.js";
 import { initSchema } from "./sqlite/schema.js";
@@ -65,10 +66,29 @@ export interface StoredSourceStatusRecord {
   readonly completedAt: string;
 }
 
+export interface StoredValidationExperimentRecord {
+  readonly id: string;
+  readonly runId: string;
+  readonly experiment: unknown;
+}
+
+export interface StoredMonitorComparisonRecord {
+  readonly id: string;
+  readonly briefId: string;
+  readonly baselineRunId: string;
+  readonly compareRunId: string;
+  readonly diff: unknown;
+  readonly createdAt: string;
+}
+
 export interface LocalStorage {
   readonly huntingBriefs: JsonEntityRepository<{ readonly id: string; readonly slug: string }>;
   readonly researchRunConfigs: JsonEntityRepository<StoredRunConfigRecord>;
   readonly compatibilityMigrations: JsonEntityRepository<{ readonly id: string; readonly completedAt: string }>;
+  readonly validationExperiments: JsonEntityRepository<StoredValidationExperimentRecord>;
+  readonly monitorSchedules: JsonEntityRepository<{ readonly id: string }>;
+  readonly monitorComparisons: JsonEntityRepository<StoredMonitorComparisonRecord>;
+  readonly agentTasks: JsonEntityRepository<{ readonly id: string }>;
   readonly libraryAdmissionResults: RunScopedRepository<StoredAdmissionResultRecord>;
   readonly sourceStatuses: RunScopedRepository<StoredSourceStatusRecord>;
   readonly researchRuns: ResearchRunRepository;
@@ -83,6 +103,7 @@ export interface LocalStorage {
   readonly blobs: BlobStore;
   readonly jobs: JobQueue;
   readonly audit: AuditLog;
+  transaction<T>(operation: () => T): T;
   close(): void;
 }
 
@@ -98,6 +119,10 @@ export function openLocalStorage(options: LocalStorageOptions): LocalStorage {
     huntingBriefs: createHuntingBriefRepository(db),
     researchRunConfigs: createJsonEntityRepository(db, "research_run_configs"),
     compatibilityMigrations: createJsonEntityRepository(db, "compatibility_migrations"),
+    validationExperiments: createJsonEntityRepository(db, "validation_experiments"),
+    monitorSchedules: createJsonEntityRepository(db, "monitor_schedules"),
+    monitorComparisons: createJsonEntityRepository(db, "monitor_comparisons"),
+    agentTasks: createJsonEntityRepository(db, "agent_tasks"),
     libraryAdmissionResults: createRunScopedRepository(db, "library_admission_results"),
     sourceStatuses: createRunScopedRepository(db, "source_statuses"),
     researchRuns: createResearchRunRepository(db),
@@ -110,14 +135,22 @@ export function openLocalStorage(options: LocalStorageOptions): LocalStorage {
       "opportunity_drafts",
     ),
     opportunities: createRunScopedRepository<Opportunity>(db, "opportunities"),
-    calibrationEvents: createRunScopedRepository<CalibrationEvent>(
-      db,
-      "calibration_events",
-    ),
+    calibrationEvents: createCalibrationEventRepository(db),
     pipelineSteps: createPipelineStepStore(db),
     blobs: new LocalFsBlobStore(blobRoot),
     jobs: createSqliteJobQueue(db),
     audit: createSqliteAuditLog(db),
+    transaction<T>(operation: () => T): T {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = operation();
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
     close() {
       db.close();
     },

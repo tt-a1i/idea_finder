@@ -240,4 +240,19 @@ describe("@idea-finder/storage local persistence", () => {
       rmSync(dataDir, { recursive: true, force: true });
     }
   });
+
+  it("rolls back canonical multi-record transactions", () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      expect(() => storage.transaction(() => {
+        storage.huntingBriefs.save({ id: "task_rollback", slug: "rollback" });
+        throw new Error("rollback requested");
+      })).toThrow("rollback requested");
+      expect(storage.huntingBriefs.get("task_rollback")).toBeNull();
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
 });
