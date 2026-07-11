@@ -36,7 +36,7 @@ storage.close();
 
 ## Repositories
 
-- `researchRuns` — keyed by id; unique on `(huntingTaskId, configHash)` for idempotent run creation
+- `researchRuns` — keyed by run id; equal `(huntingTaskId, configHash)` values may belong to distinct intentional scans
 - `rawDocuments`, `chunks`, `rawSignals`, `evidenceItems`, `opportunityDrafts`, `opportunities`, `calibrationEvents` — run-scoped JSON payloads
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`

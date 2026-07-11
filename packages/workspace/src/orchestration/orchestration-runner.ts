@@ -17,6 +17,7 @@ import type { HuntingBrief } from "../types.js";
 import type { ResearchRunner } from "../ports/research-runner.js";
 import {
   buildQueryPlanFromBrief,
+  effectiveResearchConfigHash,
   queryTermsFromBrief,
   resolveHarvestMode,
 } from "./query-plan-builder.js";
@@ -43,7 +44,7 @@ export function createOrchestrationResearchRunner(
   const pipelineDataDir = join(options.workspaceRoot, "pipeline");
 
   return {
-    async run(brief, _runId, taskId) {
+    async run(brief, request) {
       const storage = openLocalStorage({ dataDir: pipelineDataDir });
       try {
         const harvestRepo = createStorageHarvestRepository(storage);
@@ -70,17 +71,33 @@ export function createOrchestrationResearchRunner(
           },
         });
 
-        const queryPlan = buildQueryPlanFromBrief(brief, taskId);
-        const configHash = `cfg_${brief.slug}`;
+        const queryPlan = buildQueryPlanFromBrief(brief, request.taskId);
+        const configHash = effectiveResearchConfigHash(brief);
 
-        const run = orchestrator.createOrGetRun({
-          huntingTaskId: taskId,
-          configHash,
-        });
+        const run = request.execution === "new"
+          ? orchestrator.createRun({
+              runId: request.runId,
+              huntingTaskId: request.taskId,
+              configHash,
+            })
+          : orchestrator.getRun(request.runId);
+        if (!run) {
+          throw new Error(`ResearchRun not found: ${request.runId}`);
+        }
+        if (run.huntingTaskId !== request.taskId || run.configHash !== configHash) {
+          throw new Error(`ResearchRun configuration mismatch: ${request.runId}`);
+        }
 
-        const completed = await orchestrator.runPipeline(run.id, { queryPlan });
+        let completed;
+        try {
+          completed = await orchestrator.runPipeline(run.id, { queryPlan });
+        } catch {
+          completed = orchestrator.getRun(run.id);
+          if (!completed) throw new Error(`ResearchRun not found after failure: ${run.id}`);
+        }
 
         return {
+          execution: request.execution,
           run: completed,
           chunks: storage.chunks.listByRun(run.id),
           signals: storage.rawSignals.listByRun(run.id),

@@ -45,6 +45,7 @@ export interface ResearchRunOrchestratorDeps {
 export interface CreateRunRequest {
   readonly huntingTaskId: HuntingTaskId;
   readonly configHash: string;
+  readonly runId?: ResearchRunId;
 }
 
 export interface RunPipelineOptions {
@@ -52,7 +53,7 @@ export interface RunPipelineOptions {
 }
 
 export interface ResearchRunOrchestrator {
-  createOrGetRun(request: CreateRunRequest): ResearchRun;
+  createRun(request: CreateRunRequest): ResearchRun;
   getRun(runId: ResearchRunId): ResearchRun | null;
   runPipeline(
     runId: ResearchRunId,
@@ -66,17 +67,12 @@ export function createResearchRunOrchestrator(
   const { stores, harvest, intelligence } = deps;
 
   return {
-    createOrGetRun(request) {
-      const existing = stores.researchRuns.findByTaskAndConfig(
-        request.huntingTaskId,
-        request.configHash,
-      );
-      if (existing) {
-        return existing;
+    createRun(request) {
+      if (request.runId && stores.researchRuns.get(request.runId)) {
+        throw new Error(`ResearchRun already exists: ${request.runId}`);
       }
-
       const run: ResearchRun = {
-        id: asId(`run_${randomUUID()}`),
+        id: request.runId ?? asId(`run_${randomUUID()}`),
         huntingTaskId: request.huntingTaskId,
         status: "pending",
         startedAt: null,
@@ -102,11 +98,13 @@ export function createResearchRunOrchestrator(
         return run;
       }
 
-      if (run.status === "pending") {
+      if (run.status !== "running") {
         run = {
           ...run,
           status: "running",
-          startedAt: new Date().toISOString(),
+          startedAt: run.startedAt ?? new Date().toISOString(),
+          completedAt: null,
+          errorMessage: null,
         };
         stores.researchRuns.save(run);
       }

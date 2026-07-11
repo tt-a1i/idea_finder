@@ -44,7 +44,9 @@ Usage:
   idea-finder workspace diagnostics
   idea-finder brief create <slug> --title <text> [--description <text>] [--lens <l1,l2>]
   idea-finder brief list
-  idea-finder run <brief> [--orchestration]
+  idea-finder run <brief> [--fixture]
+  idea-finder run <brief> --retry <runId>
+  idea-finder run <brief> --resume <runId>
   idea-finder inbox [--brief <slug>]
   idea-finder library [--brief <slug>]
   idea-finder board calibrate <opportunityId> --action <promote|reject|park|needs_more_evidence> [--note <text>]
@@ -93,10 +95,10 @@ function usageFailure(code: string, message: string): never {
   throw new CliFailure("usage", code, message, CLI_EXIT_CODES.usage);
 }
 
-function svc(workspaceDir: string, orchestration = false): WorkspaceService {
+function svc(workspaceDir: string, mode: "fixture" | "orchestration" = "orchestration"): WorkspaceService {
   return new WorkspaceService({
     paths: resolveWorkspacePaths(workspaceDir),
-    runnerMode: orchestration || process.env.IDEA_FINDER_RUNNER === "orchestration" ? "orchestration" : "fixture",
+    runnerMode: mode,
   });
 }
 
@@ -119,7 +121,7 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
   "brief create": { valueFlags: ["--title", "--description", "--lens"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
-  run: { valueFlags: [], booleanFlags: ["--orchestration"], positionalCount: 2 },
+  run: { valueFlags: ["--retry", "--resume"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
   inbox: { valueFlags: ["--brief"], positionalCount: 1 },
   library: { valueFlags: ["--brief"], positionalCount: 1 },
   "board calibrate": { valueFlags: ["--action", "--note"], positionalCount: 3 },
@@ -172,7 +174,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const data = {
       workspace: path.resolve(workspaceDir),
       accessible: true,
-      runnerMode: process.env.IDEA_FINDER_RUNNER === "orchestration" ? "orchestration" : "fixture",
+      runnerMode: "orchestration",
       counts: {
         briefs: briefs.length,
         researchRuns: Object.keys(state.runs).length,
@@ -199,8 +201,37 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
 
   if (cmd === "run") {
     const brief = required(sub, "run.brief_required", "run requires <brief>");
-    const stored = await svc(workspaceDir, has(rest, "--orchestration")).runResearch(brief);
-    return { command: "run", data: stored, human: `Run ${stored.run.id} completed — admitted ${stored.admittedCount} opportunities (${stored.rejected.length} rejected)` };
+    const retryRunId = flag(rest, "--retry");
+    const resumeRunId = flag(rest, "--resume");
+    const fixture = has(rest, "--fixture");
+    if ([retryRunId, resumeRunId].filter(Boolean).length > 1) {
+      throw new CliFailure("validation", "run.execution_conflict", "Use only one of --retry or --resume", CLI_EXIT_CODES.validation);
+    }
+    if (fixture && (retryRunId || resumeRunId)) {
+      throw new CliFailure("validation", "run.fixture_named_run_forbidden", "Fixture mode cannot retry or resume a persisted run", CLI_EXIT_CODES.validation);
+    }
+    const execution = retryRunId ? "retried" : resumeRunId ? "resumed" : "new";
+    const stored = await svc(workspaceDir, fixture ? "fixture" : "orchestration").runResearch(brief, {
+      execution,
+      runId: (retryRunId ?? resumeRunId) as never,
+    });
+    if (stored.run.status === "failed") {
+      throw new CliFailure(
+        "internal",
+        "run.failed",
+        stored.run.errorMessage ?? `ResearchRun failed: ${stored.run.id}`,
+        CLI_EXIT_CODES.internal,
+        { execution: stored.execution, run: stored.run },
+      );
+    }
+    const incomplete = stored.run.status === "partial" ? ["ResearchRun completed with partial results"] : undefined;
+    return {
+      command: "run",
+      data: stored,
+      human: `Run ${stored.run.id} ${stored.execution} → ${stored.run.status} — admitted ${stored.admittedCount} opportunities (${stored.rejected.length} rejected)`,
+      incompleteness: incomplete,
+      exitCode: incomplete ? CLI_EXIT_CODES.partialResult : undefined,
+    };
   }
 
   if (cmd === "inbox") {
@@ -309,6 +340,9 @@ function classify(error: unknown): CliFailure {
   }
   if (error instanceof Error && /not found/i.test(error.message)) {
     return new CliFailure("missing-resource", "resource.not_found", error.message, CLI_EXIT_CODES.missingResource);
+  }
+  if (error instanceof Error && /configuration mismatch/i.test(error.message)) {
+    return new CliFailure("validation", "run.configuration_mismatch", error.message, CLI_EXIT_CODES.validation);
   }
   return new CliFailure("internal", "internal.unexpected", error instanceof Error ? error.message : String(error), CLI_EXIT_CODES.internal);
 }

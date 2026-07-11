@@ -24,7 +24,7 @@ import type {
   ValidationExperimentType,
   ValidationOutcome,
 } from "@idea-finder/core";
-import type { ResearchRunner } from "./ports/research-runner.js";
+import type { ResearchRunner, ResearchRunExecution } from "./ports/research-runner.js";
 import {
   createDefaultResearchRunner,
   createResearchRunFactory,
@@ -106,7 +106,7 @@ export class WorkspaceService {
     this.runner =
       options.runner ??
       createDefaultResearchRunner(
-        options.runnerMode ?? "fixture",
+        options.runnerMode ?? "orchestration",
         options.paths.root,
       );
   }
@@ -145,7 +145,11 @@ export class WorkspaceService {
 
   async runResearch(
     slugOrId: string,
-    options?: { readonly runner?: ResearchRunner },
+    options?: {
+      readonly runner?: ResearchRunner;
+      readonly execution?: ResearchRunExecution;
+      readonly runId?: ResearchRunId;
+    },
   ): Promise<StoredResearchRun> {
     const brief = await this.store.getBrief(slugOrId);
     if (!brief) {
@@ -153,8 +157,15 @@ export class WorkspaceService {
     }
 
     const runner = options?.runner ?? this.runner;
+    const execution = options?.execution ?? "new";
     const pendingRun = this.runFactory.createResearchRun(brief);
-    const output = await runner.run(brief, pendingRun.id, brief.id);
+    const runId = execution === "new"
+      ? pendingRun.id
+      : options?.runId;
+    if (!runId) {
+      throw new Error(`${execution} requires a ResearchRun ID`);
+    }
+    const output = await runner.run(brief, { runId, taskId: brief.id, execution });
     const run = output.run;
 
     const evidenceById = new Map(output.evidence.map((e) => [e.id, e]));
@@ -169,11 +180,8 @@ export class WorkspaceService {
     );
 
     const completedRun: StoredResearchRun = {
-      run: {
-        ...run,
-        status: run.status === "completed" ? "completed" : "completed",
-        completedAt: run.completedAt ?? new Date().toISOString(),
-      },
+      execution: output.execution,
+      run,
       briefId: brief.id,
       chunks: output.chunks,
       signals: output.signals,
@@ -192,7 +200,7 @@ export class WorkspaceService {
 
     const nextState: WorkspaceState = {
       ...state,
-      runs: [...state.runs, completedRun],
+      runs: [...state.runs.filter((stored) => stored.run.id !== run.id), completedRun],
       opportunities: nextOpportunities,
       evidenceById: mergeMaps(state.evidenceById, output.evidence),
       chunksById: mergeMaps(state.chunksById, output.chunks),

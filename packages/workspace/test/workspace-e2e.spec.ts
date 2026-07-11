@@ -1,5 +1,5 @@
 import { access } from "node:fs/promises";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -136,7 +136,7 @@ describe("workspace vertical slice", () => {
       ),
     ).toBe(0);
 
-    expect(await runCli(["run", "demo"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "demo", "--fixture"], cliOpts)).toBe(0);
     expect(lines.some((l) => l.includes("admitted 1"))).toBe(true);
 
     const libLines = lines.length;
@@ -190,6 +190,18 @@ describe("workspace vertical slice", () => {
         cliOpts,
       ),
     ).toBe(0);
+
+    const briefPath = path.join(root, "briefs", "orch.json");
+    const savedBrief = JSON.parse(await readFile(briefPath, "utf8")) as Record<string, unknown>;
+    savedBrief.queryPlan = {
+      harvestMode: "manual",
+      manualImports: [
+        { text: "Painful workaround reconciling invoices every month." },
+        { text: "Would pay for a lightweight invoicing workflow." },
+        { text: "Need something simpler for month-end invoicing." },
+      ],
+    };
+    await writeFile(briefPath, `${JSON.stringify(savedBrief, null, 2)}\n`, "utf8");
 
     expect(await runCli(["run", "orch", "--orchestration"], cliOpts)).toBe(0);
     expect(lines.some((l) => l.includes("admitted"))).toBe(true);

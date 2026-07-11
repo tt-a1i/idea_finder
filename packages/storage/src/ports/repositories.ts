@@ -12,10 +12,6 @@ import type {
 
 export interface ResearchRunRepository {
   get(id: ResearchRunId): ResearchRun | null;
-  findByTaskAndConfig(
-    huntingTaskId: string,
-    configHash: string,
-  ): ResearchRun | null;
   save(run: ResearchRun): void;
 }
 

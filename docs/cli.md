@@ -29,12 +29,15 @@ npm run cli -- brief list
 idea-finder brief list
 idea-finder workspace diagnostics
 
-# Run research — fixture mode (default, offline invoicing fixture)
+# Run a fresh ResearchRun through the real local pipeline (default)
 npm run cli -- run invoicing
 
-# Run research — real local pipeline (storage + harvest + intelligence + library admission)
-npm run cli -- run invoicing --orchestration
-# or: IDEA_FINDER_RUNNER=orchestration npm run cli -- run invoicing
+# Retry or resume a named ResearchRun without changing its identity
+npm run cli -- run invoicing --retry run_123
+npm run cli -- run invoicing --resume run_123
+
+# Demonstration fixture data is opt-in only
+npm run cli -- run invoicing --fixture
 
 # Signal inbox summary and opportunity library
 npm run cli -- inbox --brief invoicing
@@ -74,7 +77,7 @@ contain `category`, `code`, `message`, and nullable `details`.
 
 ## Orchestration mode
 
-`--orchestration` runs the real local pipeline under `<workspace>/pipeline/`:
+Normal `run` execution uses the real local pipeline under `<workspace>/pipeline/`:
 
 | Step | Package | Behavior |
 | --- | --- | --- |
@@ -85,7 +88,7 @@ contain `category`, `code`, `message`, and nullable `details`.
 
 **Harvest modes** (set on brief JSON `queryPlan.harvestMode`):
 
-- `manual` (default) — `manualImports` only; safe for tests and offline use
+- `manual` (default) — only explicitly configured `manualImports`; an empty plan yields zero evidence
 - `l0` — live L0 connectors (`hn`, `v2ex`, `app_store`, `stack_exchange`) using `sourcesEnabled` and brief lenses
 
 Example brief with explicit manual imports (`briefs/invoicing.json`):
@@ -103,7 +106,8 @@ Example brief with explicit manual imports (`briefs/invoicing.json`):
 }
 ```
 
-Fixture mode remains the default CLI path when `--orchestration` is not set.
+Fixture mode is available only with `--fixture`. Brief descriptions and bundled
+demonstration records are never treated as product evidence implicitly.
 
 ## Architecture
 

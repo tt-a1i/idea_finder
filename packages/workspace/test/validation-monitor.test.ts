@@ -92,7 +92,7 @@ describe("validation and monitor diff", () => {
         cliOpts,
       ),
     ).toBe(0);
-    expect(await runCli(["run", "v"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "v", "--fixture"], cliOpts)).toBe(0);
 
     const libStart = lines.length;
     expect(await runCli(["library", "--brief", "v"], cliOpts)).toBe(0);
@@ -147,7 +147,7 @@ describe("validation and monitor diff", () => {
       ),
     ).toBe(0);
 
-    expect(await runCli(["run", "v"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "v", "--fixture"], cliOpts)).toBe(0);
     const state = await new WorkspaceService({
       paths: resolveWorkspacePaths(root),
       runnerMode: "fixture",

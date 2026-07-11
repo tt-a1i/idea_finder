@@ -66,6 +66,7 @@ export type ResearchRunStatus =
   | "running"
   | "completed"
   | "failed"
+  | "partial"
   | "cancelled";
 
 export interface RawDocument {

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -97,7 +98,7 @@ describe("installed standalone CLI", () => {
     };
 
     expectSuccess(await invoke(executable, ["help", "--json"], consumer), "help");
-    const run = await invoke(executable, ["run", "agents", "--workspace", workspace, "--json"], consumer);
+    const run = await invoke(executable, ["run", "agents", "--fixture", "--workspace", workspace, "--json"], consumer);
     expectSuccess(run, "run");
     const runId = (run.envelope.data as { run: { id: string } }).run.id;
     expectSuccess(await invoke(executable, ["inbox", "--brief", "agents", "--workspace", workspace, "--json"], consumer), "inbox");
@@ -120,6 +121,77 @@ describe("installed standalone CLI", () => {
     expectSuccess(agent, "agent create");
     const taskId = (agent.envelope.data as { task: { id: string } }).task.id;
     expectSuccess(await invoke(executable, ["agent", "run", taskId, "--workspace", workspace, "--json"], consumer), "agent run");
+  });
+
+  it("separates new scans from named retry/resume and isolates fixtures", async () => {
+    const created = await invoke(executable, ["brief", "create", "lifecycle", "--title", "Lifecycle", "--description", "No evidence supplied", "--workspace", workspace, "--json"], consumer);
+    expect(created.code).toBe(0);
+
+    const first = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    const second = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    expect(first.code).toBe(0);
+    expect(second.code).toBe(0);
+    const firstData = first.envelope.data as { execution: string; run: { id: string; status: string; configHash: string }; chunks: unknown[]; evidence: unknown[] };
+    const secondData = second.envelope.data as typeof firstData;
+    expect(firstData.execution).toBe("new");
+    expect(secondData.execution).toBe("new");
+    expect(firstData.run.status).toBe("completed");
+    expect(secondData.run.status).toBe("completed");
+    expect(firstData.run.id).not.toBe(secondData.run.id);
+    expect(firstData.run.configHash).toBe(secondData.run.configHash);
+    expect(firstData.chunks).toEqual([]);
+    expect(firstData.evidence).toEqual([]);
+
+    const databasePath = path.join(workspace, "pipeline", "idea_finder.db");
+    const interruptedDb = new DatabaseSync(databasePath);
+    const firstHarvestAt = (interruptedDb.prepare("SELECT completed_at FROM pipeline_steps WHERE research_run_id = ? AND step = 'harvest'").get(firstData.run.id) as { completed_at: string }).completed_at;
+    interruptedDb.prepare("UPDATE research_runs SET status = 'running', completed_at = NULL WHERE id = ?").run(firstData.run.id);
+    interruptedDb.prepare("DELETE FROM pipeline_steps WHERE research_run_id = ? AND step IN ('intelligence', 'library_admission')").run(firstData.run.id);
+    interruptedDb.close();
+
+    const resumed = await invoke(executable, ["run", "lifecycle", "--resume", firstData.run.id, "--workspace", workspace, "--json"], consumer);
+    const failedDb = new DatabaseSync(databasePath);
+    const resumedSteps = failedDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(firstData.run.id) as Array<{ step: string; completed_at: string }>;
+    expect(resumedSteps).toHaveLength(3);
+    expect(resumedSteps.find((step) => step.step === "harvest")?.completed_at).toBe(firstHarvestAt);
+
+    const secondCompletedSteps = failedDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(secondData.run.id) as Array<{ step: string; completed_at: string }>;
+    failedDb.prepare("UPDATE research_runs SET status = 'failed', completed_at = NULL, error_message = 'interrupted after intelligence' WHERE id = ?").run(secondData.run.id);
+    failedDb.prepare("DELETE FROM pipeline_steps WHERE research_run_id = ? AND step = 'library_admission'").run(secondData.run.id);
+    failedDb.close();
+
+    const retried = await invoke(executable, ["run", "lifecycle", "--retry", secondData.run.id, "--workspace", workspace, "--json"], consumer);
+    const recoveredDb = new DatabaseSync(databasePath);
+    const retriedSteps = recoveredDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(secondData.run.id) as Array<{ step: string; completed_at: string }>;
+    recoveredDb.close();
+    expect(retriedSteps).toHaveLength(3);
+    for (const completed of secondCompletedSteps.filter((step) => step.step !== "library_admission")) {
+      expect(retriedSteps.find((step) => step.step === completed.step)?.completed_at).toBe(completed.completed_at);
+    }
+    expect(resumed.code).toBe(0);
+    expect(retried.code).toBe(0);
+    expect(resumed.envelope).toMatchObject({ data: { execution: "resumed", run: { id: firstData.run.id, status: "completed" } } });
+    expect(retried.envelope).toMatchObject({ data: { execution: "retried", run: { id: secondData.run.id, status: "completed" } } });
+
+    const briefPath = path.join(workspace, "briefs", "lifecycle.json");
+    const brief = JSON.parse(await readFile(briefPath, "utf8")) as Record<string, unknown>;
+    brief.queryPlan = {
+      harvestMode: "manual",
+      manualImports: [{ text: "Explicit interview: this workflow is painful and I would pay to replace it." }],
+    };
+    await writeFile(briefPath, `${JSON.stringify(brief, null, 2)}\n`, "utf8");
+    const explicitImport = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    expect(explicitImport.code).toBe(0);
+    const explicitData = explicitImport.envelope.data as typeof firstData;
+    expect(explicitData.chunks).toHaveLength(1);
+    expect(explicitData.run.configHash).not.toBe(firstData.run.configHash);
+
+    const fixture = await invoke(executable, ["run", "lifecycle", "--fixture", "--workspace", workspace, "--json"], consumer);
+    expect(fixture.code).toBe(0);
+    const fixtureData = fixture.envelope.data as { execution: string; run: { id: string }; evidence: unknown[] };
+    expect(fixtureData.execution).toBe("new");
+    expect(fixtureData.run.id).not.toBe(firstData.run.id);
+    expect(fixtureData.evidence.length).toBeGreaterThan(0);
   });
 
   it("pins usage, validation, missing-resource, policy, and internal error exits", async () => {

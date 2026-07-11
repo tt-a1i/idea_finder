@@ -1,14 +1,20 @@
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS research_runs (
+import type { DatabaseSync } from "node:sqlite";
+
+const RESEARCH_RUNS_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS research_runs (
   id TEXT PRIMARY KEY,
   hunting_task_id TEXT NOT NULL,
   status TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
   config_hash TEXT NOT NULL,
-  error_message TEXT,
-  UNIQUE (hunting_task_id, config_hash)
+  error_message TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_research_runs_task_config
+  ON research_runs (hunting_task_id, config_hash);
+`;
+
+export const SCHEMA_SQL = `
+${RESEARCH_RUNS_SCHEMA_SQL}
 
 CREATE TABLE IF NOT EXISTS raw_documents (
   id TEXT PRIMARY KEY,
@@ -92,6 +98,27 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 `;
 
-export function initSchema(db: { exec(sql: string): unknown }): void {
+export function initSchema(db: DatabaseSync): void {
+  const existing = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'research_runs'",
+  ).get() as { sql?: string } | undefined;
+  if (existing?.sql?.toUpperCase().includes("UNIQUE (HUNTING_TASK_ID, CONFIG_HASH)")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE research_runs RENAME TO research_runs_legacy_identity;
+        ${RESEARCH_RUNS_SCHEMA_SQL}
+        INSERT INTO research_runs
+          (id, hunting_task_id, status, started_at, completed_at, config_hash, error_message)
+        SELECT id, hunting_task_id, status, started_at, completed_at, config_hash, error_message
+        FROM research_runs_legacy_identity;
+        DROP TABLE research_runs_legacy_identity;
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   db.exec(SCHEMA_SQL);
 }

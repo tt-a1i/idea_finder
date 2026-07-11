@@ -17,6 +17,7 @@ import type {
   AgentPlannedEffect,
   PolicyDenial,
 } from "@idea-finder/agents";
+import type { ResearchRunExecution } from "./ports/research-runner.js";
 
 export interface ManualImportConfig {
   readonly text: string;
@@ -91,6 +92,7 @@ export interface AgentTask {
 }
 
 export interface StoredResearchRun {
+  readonly execution: ResearchRunExecution;
   readonly run: ResearchRun;
   readonly briefId: HuntingTaskId;
   readonly chunks: readonly Chunk[];

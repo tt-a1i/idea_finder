@@ -1,8 +1,10 @@
 import { asId } from "@idea-finder/core";
+import { randomUUID } from "node:crypto";
 import type { HuntingTaskId, ResearchRunId } from "@idea-finder/core";
 import type { ResearchRun } from "@idea-finder/core";
 import { invoicingFixture } from "../fixtures/invoicing-fixture.js";
 import { createOrchestrationResearchRunner } from "../orchestration/orchestration-runner.js";
+import { effectiveResearchConfigHash } from "../orchestration/query-plan-builder.js";
 import type { HuntingBrief } from "../types.js";
 import type {
   ResearchRunOutput,
@@ -13,16 +15,20 @@ import type {
 /** Fixture-backed runner — no live connectors or LLM. */
 export function createFixtureResearchRunner(): ResearchRunner {
   return {
-    async run(brief, runId, taskId): Promise<ResearchRunOutput> {
+    async run(brief, request): Promise<ResearchRunOutput> {
+      if (request.execution !== "new") {
+        throw new Error("Fixture mode only supports new ResearchRuns");
+      }
       const now = new Date().toISOString();
       return {
+        execution: request.execution,
         run: {
-          id: runId,
-          huntingTaskId: taskId,
+          id: request.runId,
+          huntingTaskId: request.taskId,
           status: "completed",
           startedAt: now,
           completedAt: now,
-          configHash: `cfg_${brief.slug}`,
+          configHash: effectiveResearchConfigHash(brief),
           errorMessage: null,
         },
         chunks: [...invoicingFixture.chunks],
@@ -67,7 +73,7 @@ export function createResearchRunFactory(): ResearchRunnerFactory {
     createResearchRun(brief: HuntingBrief): ResearchRun {
       const now = new Date().toISOString();
       return {
-        id: asId<ResearchRunId>(`run_${brief.slug}_${Date.now()}`),
+        id: asId<ResearchRunId>(`run_${randomUUID()}`),
         huntingTaskId: brief.id as HuntingTaskId,
         status: "pending",
         startedAt: now,

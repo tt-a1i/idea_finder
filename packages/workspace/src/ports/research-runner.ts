@@ -10,6 +10,7 @@ import type { HuntingBrief } from "../types.js";
 
 /** Harvest + intelligence output before library admission. */
 export interface ResearchRunOutput {
+  readonly execution: ResearchRunExecution;
   readonly run: ResearchRun;
   readonly chunks: readonly Chunk[];
   readonly signals: readonly RawSignal[];
@@ -17,12 +18,19 @@ export interface ResearchRunOutput {
   readonly drafts: readonly OpportunityDraft[];
 }
 
+export type ResearchRunExecution = "new" | "retried" | "resumed";
+
+export interface ResearchRunRequest {
+  readonly runId: ResearchRunId;
+  readonly taskId: HuntingTaskId;
+  readonly execution: ResearchRunExecution;
+}
+
 /** Port for running a research pipeline (Bisheng harvest + Ganjiang intelligence). */
 export interface ResearchRunner {
   run(
     brief: HuntingBrief,
-    runId: ResearchRunId,
-    taskId: HuntingTaskId,
+    request: ResearchRunRequest,
   ): Promise<ResearchRunOutput>;
 }
 

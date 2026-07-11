@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
@@ -40,16 +41,44 @@ describe("@idea-finder/storage local persistence", () => {
     }
   });
 
-  it("finds runs by huntingTaskId + configHash", () => {
+  it("stores distinct runs with the same huntingTaskId + configHash", () => {
     const dataDir = tempDataDir();
     try {
       const storage = openLocalStorage({ dataDir });
       storage.researchRuns.save(sampleRun());
-      const found = storage.researchRuns.findByTaskAndConfig(
-        asId("task_test_1"),
-        "cfg_test_v1",
-      );
-      expect(found?.id).toBe(asId("run_test_1"));
+      storage.researchRuns.save({ ...sampleRun(), id: asId("run_test_2") });
+      expect(storage.researchRuns.get(asId("run_test_1"))?.configHash).toBe("cfg_test_v1");
+      expect(storage.researchRuns.get(asId("run_test_2"))?.configHash).toBe("cfg_test_v1");
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates the legacy task/config uniqueness without losing runs", () => {
+    const dataDir = tempDataDir();
+    try {
+      const legacy = new DatabaseSync(join(dataDir, "idea_finder.db"));
+      legacy.exec(`
+        CREATE TABLE research_runs (
+          id TEXT PRIMARY KEY,
+          hunting_task_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          config_hash TEXT NOT NULL,
+          error_message TEXT,
+          UNIQUE (hunting_task_id, config_hash)
+        );
+        INSERT INTO research_runs VALUES
+          ('run_legacy', 'task_test_1', 'completed', NULL, NULL, 'cfg_test_v1', NULL);
+      `);
+      legacy.close();
+
+      const storage = openLocalStorage({ dataDir });
+      expect(storage.researchRuns.get(asId("run_legacy"))?.configHash).toBe("cfg_test_v1");
+      storage.researchRuns.save({ ...sampleRun(), id: asId("run_after_migration") });
+      expect(storage.researchRuns.get(asId("run_after_migration"))?.configHash).toBe("cfg_test_v1");
       storage.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
