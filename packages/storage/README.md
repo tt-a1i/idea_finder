@@ -42,6 +42,7 @@ storage.close();
 - `libraryAdmissionResults`, `sourceStatuses` — admitted/rejected outcomes and source execution state
 - `calibrationEvents` — append-only Decision Board history scoped by ResearchRun
 - `validationExperiments`, `monitorSchedules`, `monitorComparisons`, `agentTasks` — canonical runtime state
+- `metricObservations`, `trendSeries`, `trendEvents`, `quantitativeSourceStatuses` — canonical quantitative observations, derived momentum, provenance, and source health; stable identities and references fail closed
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

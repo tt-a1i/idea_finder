@@ -14,6 +14,9 @@ export type SignalClusterId = EntityId;
 export type AgentRunId = EntityId;
 export type ValidationExperimentId = EntityId;
 export type MonitorScheduleId = EntityId;
+export type MetricObservationId = EntityId;
+export type TrendSeriesId = EntityId;
+export type TrendEventId = EntityId;
 
 export function asId<T extends EntityId>(value: string): T {
   return value as T;

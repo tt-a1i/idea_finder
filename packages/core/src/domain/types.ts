@@ -12,6 +12,9 @@ import type {
   SignalClusterId,
   ValidationExperimentId,
   MonitorScheduleId,
+  MetricObservationId,
+  TrendSeriesId,
+  TrendEventId,
 } from "./ids.js";
 
 export type SourceTier = "L0" | "L1" | "L2" | "L3";
@@ -275,4 +278,73 @@ export interface MonitorDiff {
   readonly computedAt: string;
   readonly entries: readonly MonitorDiffEntry[];
   readonly summary: MonitorDiffSummary;
+}
+
+/** Quantitative evidence is deliberately separate from qualitative RawSignal/EvidenceItem. */
+export type QuantitativeEvidenceLane = "developer_adoption" | "supply";
+
+export type GitHubMetric =
+  | "stars"
+  | "forks"
+  | "contributors"
+  | "issue_opened"
+  | "issue_closed"
+  | "open_issues"
+  | "repository_count"
+  | "trending_rank";
+
+export interface MetricSubject {
+  readonly kind: "repository" | "organization" | "topic";
+  readonly externalId: string;
+  readonly url: string;
+}
+
+export interface MetricObservationProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface: "github_rest_api" | "github_graphql_api" | "github_public_dataset";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+}
+
+export interface MetricObservation {
+  readonly id: MetricObservationId;
+  readonly subject: MetricSubject;
+  readonly source: "github";
+  readonly metric: GitHubMetric;
+  readonly lane: QuantitativeEvidenceLane;
+  readonly geography: string | null;
+  readonly observedAt: string;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly unit: "count" | "rank";
+  readonly collectionMethod: MetricObservationProvenance["interface"];
+  readonly provenance: MetricObservationProvenance;
+}
+
+export interface TrendSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: MetricSubject;
+  readonly source: "github";
+  readonly metric: GitHubMetric;
+  readonly lane: QuantitativeEvidenceLane;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export type TrendEventKind = "momentum_up" | "momentum_down" | "stable";
+
+export interface TrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: TrendEventKind;
+  readonly detectedAt: string;
+  readonly previousObservationId: MetricObservationId;
+  readonly currentObservationId: MetricObservationId;
+  readonly previousValue: number;
+  readonly currentValue: number;
+  readonly absoluteDelta: number;
+  readonly relativeDelta: number | null;
+  readonly detector: "two_point_delta_v1";
 }

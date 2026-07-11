@@ -1,4 +1,5 @@
 export * from "./ports/source-connector.js";
+export * from "./ports/quantitative-connector.js";
 export * from "./query-plan.js";
 export * from "./lib/fetch.js";
 export * from "./lib/normalize.js";
@@ -12,6 +13,7 @@ export * from "./connectors/v2ex.js";
 export * from "./connectors/app-store-rss.js";
 export * from "./connectors/stack-exchange.js";
 export * from "./connectors/manual-import.js";
+export * from "./connectors/github.js";
 export { createManualImportConnector } from "./connectors/manual-import.js";
 export * from "./l0-pack.js";
 export { connectorByPlatform } from "./l0-pack.js";

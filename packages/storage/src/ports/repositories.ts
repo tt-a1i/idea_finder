@@ -8,6 +8,10 @@ import type {
   RawSignal,
   ResearchRun,
   ResearchRunId,
+  MetricObservation,
+  TrendEvent,
+  TrendSeries,
+  GitHubMetric,
 } from "@idea-finder/core";
 
 export interface ResearchRunRepository {
@@ -39,6 +43,29 @@ export interface CalibrationEventRepository {
   append(runId: ResearchRunId, event: CalibrationEvent): void;
   get(runId: ResearchRunId, id: string): CalibrationEvent | null;
   listByRun(runId: ResearchRunId): CalibrationEvent[];
+}
+
+export interface QuantitativeListFilter {
+  readonly subjectExternalId?: string;
+  readonly metric?: GitHubMetric;
+}
+
+export interface MetricObservationRepository {
+  save(observation: MetricObservation): void;
+  get(id: string): MetricObservation | null;
+  list(filter?: QuantitativeListFilter): MetricObservation[];
+}
+
+export interface TrendSeriesRepository {
+  save(series: TrendSeries): void;
+  get(id: string): TrendSeries | null;
+  list(filter?: QuantitativeListFilter): TrendSeries[];
+}
+
+export interface TrendEventRepository {
+  append(event: TrendEvent): void;
+  get(id: string): TrendEvent | null;
+  listBySeries(seriesId: string): TrendEvent[];
 }
 
 export interface PipelineStepStore {

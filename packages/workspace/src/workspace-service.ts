@@ -4,10 +4,14 @@ import {
   completeValidationExperiment as applyValidationCompletion,
   computeMonitorDiff as buildMonitorDiff,
   createValidationExperiment as buildValidationExperiment,
+  buildTrendSeries,
+  createGitHubMetricObservation,
+  detectLatestTrendEvent,
   startValidationExperiment as markValidationExperimentRunning,
 } from "@idea-finder/core";
+import { createGitHubQuantitativeConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { openLocalStorage, type LocalStorage } from "@idea-finder/storage";
 import type {
   ActorKind,
@@ -19,12 +23,16 @@ import type {
   MonitorCadence,
   MonitorDiff,
   MonitorSchedule,
+  GitHubMetric,
+  MetricObservation,
   Opportunity,
   RawSignal,
   ResearchRunId,
   ValidationExperiment,
   ValidationExperimentType,
   ValidationOutcome,
+  TrendEvent,
+  TrendSeries,
 } from "@idea-finder/core";
 import type { ResearchRunner, ResearchRunExecution } from "./ports/research-runner.js";
 import {
@@ -55,6 +63,15 @@ export interface WorkspaceServiceOptions {
   readonly runner?: ResearchRunner;
   readonly runnerMode?: "fixture" | "orchestration";
 }
+
+const CONNECTOR_METRICS: Readonly<Record<string, GitHubMetric>> = {
+  "github.repository.stars": "stars",
+  "github.repository.forks": "forks",
+  "github.repository.open_issues": "open_issues",
+  "github.issue.opened": "issue_opened",
+  "github.issue.closed": "issue_closed",
+  "github.repository.contributors": "contributors",
+};
 
 function summarizeInbox(signals: readonly RawSignal[]): InboxSignalSummary[] {
   const byType = new Map<string, RawSignal[]>();
@@ -849,6 +866,134 @@ export class WorkspaceService {
         storage.opportunities.save(record.runId, result.opportunity);
       });
       return result;
+    } finally {
+      storage.close();
+    }
+  }
+
+  async collectGithubMetrics(input: {
+    subject: string;
+    since?: string;
+    apiBase?: string;
+    connector?: QuantitativeConnector;
+  }): Promise<{
+    observations: readonly MetricObservation[];
+    series: readonly TrendSeries[];
+    events: readonly TrendEvent[];
+  }> {
+    const connector = input.connector ?? createGitHubQuantitativeConnector({ baseUrl: input.apiBase });
+    const subjectExternalId = input.subject.replace(/^github:/, "").toLowerCase();
+    try {
+      const health = await connector.healthcheck();
+      if (!health.ok) throw new Error(health.message ?? "GitHub quantitative connector healthcheck failed");
+      const collected = await connector.collect({ subject: input.subject, since: input.since });
+      const observations = collected.map((item) => {
+        const metric = CONNECTOR_METRICS[item.metric];
+        if (!metric) throw new Error(`Unsupported GitHub quantitative metric: ${item.metric}`);
+        return createGitHubMetricObservation({
+          id: asId(item.id),
+          subject: { kind: "repository", externalId: subjectExternalId, url: `https://github.com/${subjectExternalId}` },
+          metric,
+          geography: item.geography,
+          observedAt: item.observedAt,
+          rawValue: item.rawValue,
+          normalizedValue: item.normalizedValue,
+          provenance: {
+            collector: "idea-finder-github",
+            collectorVersion: "1",
+            interface: "github_rest_api",
+            sourceRef: item.provenance.url,
+            collectedAt: item.provenance.retrievedAt,
+          },
+        });
+      });
+      const storage = this.openCanonical();
+      try {
+        const series: TrendSeries[] = [];
+        const events: TrendEvent[] = [];
+        storage.transaction(() => {
+          for (const observation of observations) storage.metricObservations.save(observation);
+          for (const metric of [...new Set(observations.map((item) => item.metric))]) {
+            const all = storage.metricObservations.list({ subjectExternalId, metric });
+            const subjectKey = createHash("sha256").update(subjectExternalId).digest("hex").slice(0, 20);
+            const built = buildTrendSeries(asId(`trend_github_${subjectKey}_${metric}`), all);
+            storage.trendSeries.save(built.series);
+            series.push(built.series);
+            const event = detectLatestTrendEvent(
+              built.series,
+              new Map(built.observations.map((item) => [item.id, item])),
+              { detectedAt: observations[0]?.provenance.collectedAt ?? new Date().toISOString(), stableRelativeThreshold: 0 },
+            );
+            if (event) {
+              storage.trendEvents.append(event);
+              events.push(event);
+            }
+          }
+          storage.quantitativeSourceStatuses.save({
+            id: `github:${subjectExternalId}`,
+            source: "github",
+            subjectExternalId,
+            status: "success",
+            itemCount: observations.length,
+            reason: null,
+            checkedAt: observations[0]?.provenance.collectedAt ?? new Date().toISOString(),
+          });
+        });
+        return { observations, series, events };
+      } finally {
+        storage.close();
+      }
+    } catch (error) {
+      const storage = this.openCanonical();
+      try {
+        storage.quantitativeSourceStatuses.save({
+          id: `github:${subjectExternalId}`,
+          source: "github",
+          subjectExternalId,
+          status: "failure",
+          itemCount: 0,
+          reason: error instanceof Error ? error.message : String(error),
+          checkedAt: new Date().toISOString(),
+        });
+      } finally {
+        storage.close();
+      }
+      throw error;
+    }
+  }
+
+  listMetricObservations(subjectExternalId?: string, metric?: GitHubMetric): MetricObservation[] {
+    const storage = this.openCanonical();
+    try {
+      return storage.metricObservations.list({ subjectExternalId, metric });
+    } finally {
+      storage.close();
+    }
+  }
+
+  listTrendSeries(subjectExternalId?: string, metric?: GitHubMetric): TrendSeries[] {
+    const storage = this.openCanonical();
+    try {
+      return storage.trendSeries.list({ subjectExternalId, metric });
+    } finally {
+      storage.close();
+    }
+  }
+
+  listTrendEvents(subjectExternalId?: string, metric?: GitHubMetric): TrendEvent[] {
+    const storage = this.openCanonical();
+    try {
+      return storage.trendSeries.list({ subjectExternalId, metric })
+        .flatMap((series) => storage.trendEvents.listBySeries(series.id));
+    } finally {
+      storage.close();
+    }
+  }
+
+  listQuantitativeSourceStatuses(): unknown[] {
+    const storage = this.openCanonical();
+    try {
+      return storage.quantitativeSourceStatuses.list();
     } finally {
       storage.close();
     }

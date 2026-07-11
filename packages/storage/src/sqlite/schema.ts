@@ -62,6 +62,44 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS metric_observations (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,
+  subject_external_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  collection_method TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method)
+);
+CREATE INDEX IF NOT EXISTS idx_metric_observations_subject_metric
+  ON metric_observations (subject_external_id, metric, observed_at);
+
+CREATE TABLE IF NOT EXISTS trend_series (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  subject_external_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trend_series_subject_metric
+  ON trend_series (subject_external_id, metric);
+
+CREATE TABLE IF NOT EXISTS trend_events (
+  id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trend_events_series
+  ON trend_events (series_id, detected_at);
+
+CREATE TABLE IF NOT EXISTS quantitative_source_statuses (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_documents (
   id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,

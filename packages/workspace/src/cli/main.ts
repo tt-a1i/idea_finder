@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
-import type { CalibrationAction, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
+import type { QuantitativeConnector } from "@idea-finder/connectors";
+import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
 import { WorkspaceService } from "../workspace-service.js";
@@ -36,6 +37,7 @@ const EXPERIMENT_TYPES = ["mom_test", "landing", "community_test", "spike", "cus
 const OUTCOMES = ["validated", "invalidated", "inconclusive", "blocked"] as const;
 const CADENCES = ["manual", "daily", "weekly"] as const;
 const AGENT_KINDS = ["research", "browser", "computer", "coding"] as const;
+const GITHUB_METRICS = ["stars", "forks", "contributors", "issue_opened", "issue_closed", "open_issues", "repository_count", "trending_rank"] as const;
 
 function usage(): string {
   return `idea-finder — local demand workspace CLI
@@ -57,6 +59,10 @@ Usage:
   idea-finder validation complete <experimentId> --outcome <validated|invalidated|inconclusive|blocked> --summary <text>
   idea-finder monitor diff --brief <slug> --baseline <runId> --compare <runId>
   idea-finder monitor schedule <brief> --cadence <manual|daily|weekly> [--enabled <true|false>]
+  idea-finder trends collect github <owner/repository> [--since <iso-time>] [--fixture]
+  idea-finder trends observations [--subject <owner/repository>] [--metric <metric>]
+  idea-finder trends series [--subject <owner/repository>] [--metric <metric>]
+  idea-finder trends events [--subject <owner/repository>] [--metric <metric>]
   idea-finder export <brief> [--out <path.md>]
   idea-finder agent list
   idea-finder agent create --kind <research|browser|computer|coding> --intent <text> [--opportunity <id>] [--evidence <id,id>] [--domain-write] [--dry-run]
@@ -145,6 +151,10 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "validation complete": { valueFlags: ["--outcome", "--summary"], positionalCount: 3 },
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
   "monitor schedule": { valueFlags: ["--cadence", "--enabled"], positionalCount: 3 },
+  "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars"], booleanFlags: ["--fixture"], positionalCount: 4 },
+  "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
+  "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
+  "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
   "agent list": { valueFlags: [], positionalCount: 2 },
   "agent create": { valueFlags: ["--kind", "--intent", "--opportunity", "--evidence"], booleanFlags: ["--domain-write", "--dry-run"], positionalCount: 2 },
@@ -329,6 +339,55 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     if (enabledRaw !== undefined && !["true", "false", "1", "0"].includes(enabledRaw)) throw new CliFailure("validation", "monitor.enabled_invalid", "--enabled must be true or false", CLI_EXIT_CODES.validation);
     const schedule = await svc(workspaceDir).setMonitorSchedule({ briefSlugOrId, cadence, enabled: enabledRaw === undefined ? undefined : enabledRaw === "true" || enabledRaw === "1" });
     return { command: "monitor schedule", data: { schedule }, human: `Monitor schedule ${schedule.id}: cadence=${schedule.cadence} enabled=${schedule.enabled}` };
+  }
+
+  if (cmd === "trends" && sub === "collect") {
+    if (rest[0] !== "github") usageFailure("trends.source_required", "trends collect requires github <owner/repository>");
+    const subject = required(rest[1], "trends.subject_required", "trends collect github requires <owner/repository>");
+    const since = flag(rest, "--since");
+    if (since && Number.isNaN(Date.parse(since))) throw new CliFailure("validation", "trends.since_invalid", "--since must be an ISO date-time", CLI_EXIT_CODES.validation);
+    const fixtureTime = flag(rest, "--fixture-time") ?? "2026-07-11T00:00:00.000Z";
+    if (has(rest, "--fixture") && Number.isNaN(Date.parse(fixtureTime))) throw new CliFailure("validation", "trends.fixture_time_invalid", "--fixture-time must be an ISO date-time", CLI_EXIT_CODES.validation);
+    const fixtureStars = Number(flag(rest, "--fixture-stars") ?? "120");
+    if (has(rest, "--fixture") && (!Number.isFinite(fixtureStars) || fixtureStars < 0)) throw new CliFailure("validation", "trends.fixture_stars_invalid", "--fixture-stars must be a non-negative number", CLI_EXIT_CODES.validation);
+    const fixtureConnector: QuantitativeConnector | undefined = has(rest, "--fixture") ? {
+      source: "github",
+      async healthcheck() { return { ok: true }; },
+      async collect(request) {
+        const observedAt = fixtureTime;
+        return [
+          ["github.repository.stars", fixtureStars], ["github.repository.forks", 18],
+          ["github.repository.open_issues", 7], ["github.issue.opened", 4],
+          ["github.issue.closed", 3], ["github.repository.contributors", 12],
+        ].map(([metric, value]) => ({
+          id: `metric_fixture_${String(metric).replace(/\W/g, "_")}_${observedAt}`,
+          subject: `github:${request.subject.replace(/^github:/, "").toLowerCase()}`,
+          source: "github", metric: String(metric), geography: null, observedAt,
+          rawValue: Number(value), normalizedValue: Number(value), unit: "count" as const,
+          collectionMethod: "authorized_public_api" as const,
+          provenance: { url: "fixture://github-recorded", endpoint: "recorded-fixture", apiVersion: "2022-11-28", retrievedAt: observedAt },
+        }));
+      },
+    } : undefined;
+    const result = await svc(workspaceDir).collectGithubMetrics({ subject, since, apiBase: flag(rest, "--api-base"), connector: fixtureConnector });
+    return { command: "trends collect", data: { ...result, sourceHealth: svc(workspaceDir).listQuantitativeSourceStatuses() }, human: `Collected ${result.observations.length} GitHub observations for ${subject}` };
+  }
+
+  if (cmd === "trends" && ["observations", "series", "events"].includes(sub ?? "")) {
+    const subject = flag(rest, "--subject")?.replace(/^github:/, "").toLowerCase();
+    const metricRaw = flag(rest, "--metric");
+    const metric = metricRaw ? oneOf(metricRaw, GITHUB_METRICS, "metric") as GitHubMetric : undefined;
+    const service = svc(workspaceDir);
+    if (sub === "observations") {
+      const observations = service.listMetricObservations(subject, metric);
+      return { command: "trends observations", data: { observations, sourceHealth: service.listQuantitativeSourceStatuses() }, human: `Metric observations: ${observations.length}` };
+    }
+    if (sub === "series") {
+      const series = service.listTrendSeries(subject, metric);
+      return { command: "trends series", data: { series }, human: `Trend series: ${series.length}` };
+    }
+    const events = service.listTrendEvents(subject, metric);
+    return { command: "trends events", data: { events }, human: `Trend events: ${events.length}` };
   }
 
   if (cmd === "export") {

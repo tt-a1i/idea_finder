@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 import { asId } from "@idea-finder/core";
-import type { ResearchRun } from "@idea-finder/core";
+import type { MetricObservation, ResearchRun, TrendEvent, TrendSeries } from "@idea-finder/core";
 
 import { openLocalStorage } from "./index.js";
 
@@ -250,6 +250,141 @@ describe("@idea-finder/storage local persistence", () => {
         throw new Error("rollback requested");
       })).toThrow("rollback requested");
       expect(storage.huntingBriefs.get("task_rollback")).toBeNull();
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists and queries canonical quantitative state across restart", () => {
+    const dataDir = tempDataDir();
+    const observation = {
+      id: asId("metric_github_stars_1"),
+      subject: { kind: "repository" as const, externalId: "octocat/hello-world", url: "https://github.com/octocat/Hello-World" },
+      source: "github" as const,
+      metric: "stars" as const,
+      lane: "developer_adoption" as const,
+      geography: null,
+      observedAt: "2026-07-11T00:00:00.000Z",
+      rawValue: 2150,
+      normalizedValue: 2150,
+      unit: "count" as const,
+      collectionMethod: "github_rest_api" as const,
+      provenance: {
+        collector: "idea-finder-github", collectorVersion: "1", interface: "github_rest_api" as const,
+        sourceRef: "https://api.github.com/repos/octocat/Hello-World", collectedAt: "2026-07-11T00:00:00.000Z",
+      },
+    } satisfies MetricObservation;
+    const previousObservation = {
+      ...observation,
+      id: asId("metric_github_stars_0"),
+      observedAt: "2026-07-10T00:00:00.000Z",
+      rawValue: 2000,
+      normalizedValue: 2000,
+    } satisfies MetricObservation;
+    const series = {
+      id: asId("trend_github_stars"), subject: observation.subject, source: "github" as const,
+      metric: "stars" as const, lane: "developer_adoption" as const, observationIds: [previousObservation.id, observation.id],
+      startedAt: previousObservation.observedAt, endedAt: observation.observedAt,
+    } satisfies TrendSeries;
+    const event = {
+      id: asId(`tevt_${series.id}_${observation.id}_momentum_up`), seriesId: series.id, kind: "momentum_up" as const,
+      detectedAt: "2026-07-11T00:01:00.000Z", previousObservationId: previousObservation.id,
+      currentObservationId: observation.id, previousValue: 2000, currentValue: 2150,
+      absoluteDelta: 150, relativeDelta: 0.075, detector: "two_point_delta_v1" as const,
+    } satisfies TrendEvent;
+    try {
+      const storage = openLocalStorage({ dataDir });
+      storage.transaction(() => {
+        storage.metricObservations.save(previousObservation);
+        storage.metricObservations.save(observation);
+        storage.metricObservations.save(observation);
+        storage.trendSeries.save(series);
+        storage.trendEvents.append(event);
+        storage.quantitativeSourceStatuses.save({
+          id: "github:octocat/hello-world", source: "github", subjectExternalId: "octocat/hello-world",
+          status: "success", itemCount: 1, reason: null, checkedAt: observation.observedAt,
+        });
+      });
+      expect(storage.metricObservations.list({ subjectExternalId: "octocat/hello-world", metric: "stars" })).toEqual([previousObservation, observation]);
+      expect(storage.metricObservations.list({ metric: "forks" })).toEqual([]);
+      storage.close();
+
+      const restarted = openLocalStorage({ dataDir });
+      expect(restarted.metricObservations.get(observation.id)).toEqual(observation);
+      expect(restarted.trendSeries.list({ subjectExternalId: "octocat/hello-world" })).toEqual([series]);
+      expect(restarted.trendEvents.listBySeries(series.id)).toEqual([event]);
+      expect(restarted.quantitativeSourceStatuses.get("github:octocat/hello-world")?.status).toBe("success");
+      restarted.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on quantitative identity conflicts and rolls back a batch", () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      const base = {
+        id: asId("metric_identity"),
+        subject: { kind: "repository" as const, externalId: "owner/repo", url: "https://github.com/owner/repo" },
+        source: "github" as const, metric: "stars" as const, lane: "developer_adoption" as const,
+        geography: null, observedAt: "2026-07-11T00:00:00.000Z", rawValue: 1, normalizedValue: 1,
+        unit: "count" as const, collectionMethod: "github_rest_api" as const,
+        provenance: { collector: "test", collectorVersion: "1", interface: "github_rest_api" as const, sourceRef: "fixture", collectedAt: "2026-07-11T00:00:00.000Z" },
+      } satisfies MetricObservation;
+      storage.metricObservations.save(base);
+      expect(() => storage.metricObservations.save({ ...base, id: asId("metric_wrong_lane"), lane: "supply" })).toThrow("lane conflicts");
+      expect(() => storage.metricObservations.save({ ...base, id: asId("metric_wrong_unit"), unit: "rank" })).toThrow("derived fields conflict");
+      expect(() => storage.metricObservations.save({ ...base, normalizedValue: 2 })).toThrow("conflicts with canonical SQLite state");
+      expect(storage.metricObservations.list()).toEqual([base]);
+      expect(() => storage.trendSeries.save({
+        id: asId("trend_missing"), subject: base.subject, source: "github", metric: "stars",
+        lane: "developer_adoption", observationIds: [asId("metric_missing")],
+        startedAt: base.observedAt, endedAt: base.observedAt,
+      })).toThrow("references missing MetricObservation");
+      const otherSubject = { ...base, id: asId("metric_other_subject"), subject: { ...base.subject, externalId: "other/repo", url: "https://github.com/other/repo" } };
+      storage.metricObservations.save(otherSubject);
+      expect(() => storage.trendSeries.save({
+        id: asId("trend_mixed_identity"), subject: base.subject, source: "github", metric: "stars",
+        lane: "developer_adoption", observationIds: [base.id, otherSubject.id],
+        startedAt: base.observedAt, endedAt: otherSubject.observedAt,
+      })).toThrow("conflicts with series identity");
+      const later = { ...base, id: asId("metric_later"), observedAt: "2026-07-12T00:00:00.000Z", rawValue: 2, normalizedValue: 2 };
+      storage.metricObservations.save(later);
+      const validSeries = {
+        id: asId("trend_valid"), subject: base.subject, source: "github" as const, metric: "stars" as const,
+        lane: "developer_adoption" as const, observationIds: [base.id, later.id],
+        startedAt: base.observedAt, endedAt: later.observedAt,
+      } satisfies TrendSeries;
+      storage.trendSeries.save(validSeries);
+      expect(() => storage.trendSeries.save({
+        ...validSeries,
+        id: asId("trend_reversed"),
+        observationIds: [later.id, base.id],
+      })).toThrow("structure conflicts with canonical observations");
+      expect(() => storage.trendSeries.save({
+        ...validSeries,
+        id: asId("trend_repeated"),
+        observationIds: [base.id, base.id, later.id],
+      })).toThrow("structure conflicts with canonical observations");
+      expect(() => storage.trendSeries.save({
+        ...validSeries,
+        id: asId("trend_forged_bounds"),
+        startedAt: "2020-01-01T00:00:00.000Z",
+        endedAt: "2030-01-01T00:00:00.000Z",
+      })).toThrow("structure conflicts with canonical observations");
+      expect(() => storage.trendEvents.append({
+        id: asId(`tevt_${validSeries.id}_${later.id}_momentum_up`), seriesId: validSeries.id,
+        kind: "momentum_up", detectedAt: later.observedAt, previousObservationId: base.id,
+        currentObservationId: later.id, previousValue: 1, currentValue: 999,
+        absoluteDelta: 998, relativeDelta: 998, detector: "two_point_delta_v1",
+      })).toThrow("conflicts with referenced observations");
+      expect(() => storage.transaction(() => {
+        storage.quantitativeSourceStatuses.save({ id: "batch-failure", source: "github", subjectExternalId: "owner/repo", status: "failure", itemCount: 0, reason: "drift", checkedAt: base.observedAt });
+        throw new Error("batch rollback");
+      })).toThrow("batch rollback");
+      expect(storage.quantitativeSourceStatuses.get("batch-failure")).toBeNull();
       storage.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });

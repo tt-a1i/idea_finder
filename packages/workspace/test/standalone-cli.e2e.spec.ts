@@ -116,6 +116,17 @@ describe("installed standalone CLI", () => {
 
     expectSuccess(await invoke(executable, ["monitor", "schedule", "agents", "--cadence", "weekly", "--workspace", workspace, "--json"], consumer), "monitor schedule");
     expectSuccess(await invoke(executable, ["monitor", "diff", "--brief", "agents", "--baseline", runId, "--compare", runId, "--workspace", workspace, "--json"], consumer), "monitor diff");
+    expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--workspace", workspace, "--json"], consumer), "trends collect");
+    expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--fixture-time", "2026-07-12T00:00:00.000Z", "--fixture-stars", "180", "--workspace", workspace, "--json"], consumer), "trends collect");
+    const installedObservations = await invoke(executable, ["trends", "observations", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedObservations, "trends observations");
+    expect((installedObservations.envelope.data as { observations: unknown[] }).observations).toHaveLength(2);
+    const installedSeries = await invoke(executable, ["trends", "series", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedSeries, "trends series");
+    expect((installedSeries.envelope.data as { series: Array<{ observationIds: unknown[] }> }).series[0]?.observationIds).toHaveLength(2);
+    const installedEvents = await invoke(executable, ["trends", "events", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedEvents, "trends events");
+    expect(installedEvents.envelope).toMatchObject({ data: { events: [expect.objectContaining({ kind: "momentum_up", previousValue: 120, currentValue: 180 })] } });
     expectSuccess(await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer), "export");
     expectSuccess(await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer), "agent list");
     const agent = await invoke(executable, ["agent", "create", "--kind", "research", "--intent", "inspect evidence", "--workspace", workspace, "--json"], consumer);

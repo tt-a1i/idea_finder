@@ -98,6 +98,22 @@ or written as runtime state. Calibration events are append-only, while validatio
 experiments, agent tasks, monitor schedules, and monitor comparison metadata use
 the same canonical SQLite database.
 
+GitHub quantitative collection is a separate evidence lane:
+
+```bash
+idea-finder trends collect github owner/repository --since 2026-07-01T00:00:00Z --json
+idea-finder trends observations --subject owner/repository --metric stars --json
+idea-finder trends series --subject owner/repository --metric stars --json
+idea-finder trends events --subject owner/repository --metric stars --json
+```
+
+It uses the authorized public GitHub REST API (anonymous for public repositories,
+or `GITHUB_TOKEN` when set) and records raw/normalized values plus request
+provenance and source health in SQLite. Repository stars, forks, contributors,
+issue activity, and open-issue counts are classified only as developer-adoption
+or supply evidence. They are not `RawSignal`/`EvidenceItem` records and cannot by
+themselves satisfy Library admission or promotion.
+
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an
 unambiguous list-to-inspect path across Briefs and historical runs. Commands
