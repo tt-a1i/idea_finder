@@ -1,0 +1,4 @@
+interface:
+  display_name: "Idea Finder"
+  short_description: "Evidence-native demand research workflows"
+  default_prompt: "Use $idea-finder to turn my demand-research request into a safe CLI workflow with cited evidence."

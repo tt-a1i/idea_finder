@@ -12,6 +12,14 @@ npm install -g ./idea-finder-0.0.0.tgz
 idea-finder workspace diagnostics --json
 ```
 
+The package also ships the companion Codex Skill. For a local clean install:
+
+```bash
+npm install -g ./idea-finder-0.0.0.tgz
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R "$(npm root -g)/idea-finder/skills/idea-finder" "${CODEX_HOME:-$HOME/.codex}/skills/idea-finder"
+```
+
 The packed root package contains a bundled `idea-finder` executable and does not
 require this repository or its npm scripts at runtime. During repository
 development, `npm link` exposes the same executable.

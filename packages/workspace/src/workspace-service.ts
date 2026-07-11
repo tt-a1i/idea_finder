@@ -1243,8 +1243,7 @@ export class WorkspaceService {
     if (!brief) throw new Error(`Brief not found: ${briefRef}`);
     const stored = await this.runResearch(briefRef, { execution: options.execution, runId: options.runId });
     const fixture = options.fixtureSet !== undefined;
-    const plan = brief.queryPlan?.quantitative;
-    if (!plan) throw new Error(`Brief has no quantitative research plan: ${briefRef}`);
+    const plan = brief.queryPlan?.quantitative ?? {};
 
     const independence = buildExactDuplicateIndependenceIndex(stored.documents.map((document) => ({ documentId: document.id, content: document.rawBody })));
     const groupByDocument = independence.independenceGroupByDocumentId;

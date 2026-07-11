@@ -92,6 +92,20 @@ describe("installed standalone CLI", () => {
 
     const listed = await invoke(executable, ["brief", "list", "--workspace", workspace, "--json"], consumer);
     expect(listed.envelope).toMatchObject({ command: "brief list", data: { briefs: [{ slug: "agents", title: "Agent demand" }] } });
+    const discovery = await invoke(executable, ["brief", "create", "public-discovery", "--title", "Public discovery", "--source", "hn", "--source", "stack_exchange", "--term", "agent coding", "--workspace", workspace, "--json"], consumer);
+    expect(discovery.code).toBe(0);
+    expect(discovery.envelope).toMatchObject({ data: { brief: { queryPlan: { harvestMode: "l0", searches: [expect.objectContaining({ platform: "hn", terms: ["agent coding"] }), expect.objectContaining({ platform: "stack_exchange", terms: ["agent coding"] })] } } } });
+    for (const orphan of [["--term", "orphan"], ["--app-id", "123"], ["--stackexchange-site", "stackoverflow"]]) {
+      const rejected = await invoke(executable, ["brief", "create", `orphan-${orphan[0]!.slice(2)}`, "--title", "Orphan option", ...orphan, "--workspace", workspace, "--json"], consumer);
+      expect(rejected.code).toBe(CLI_EXIT_CODES.usage);
+    }
+    expect((await invoke(executable, ["brief", "create", "qualitative-inspect", "--title", "Qualitative inspect", "--manual-import", "This reconciliation workaround is painful every week.", "--workspace", workspace, "--json"], consumer)).code).toBe(0);
+    const qualitativeRun = await invoke(executable, ["research", "run", "qualitative-inspect", "--workspace", workspace, "--json"], consumer);
+    expect(qualitativeRun.code).toBe(0);
+    const qualitativeRunId = (qualitativeRun.envelope.data as { runId: string }).runId;
+    const qualitativeInspect = await invoke(executable, ["research", "inspect", qualitativeRunId, "--workspace", workspace, "--json"], consumer);
+    expect(qualitativeInspect.code).toBe(0);
+    expect(qualitativeInspect.envelope).toMatchObject({ data: { claims: expect.arrayContaining([expect.objectContaining({ lane: "qualitative_demand" })]), details: expect.arrayContaining([expect.objectContaining({ evidence: expect.objectContaining({ quoteVerbatim: expect.stringContaining("painful"), url: expect.any(String) }), document: expect.any(Object) })]) } });
   });
 
   it("returns the pinned envelope from every implemented command", async () => {
@@ -557,9 +571,17 @@ describe("installed standalone CLI", () => {
     expect(machine.envelope.data).toEqual({ briefs: [] });
   });
 
-  it("ships only the bundled executable required at runtime", async () => {
+  it("ships the bundled executable and companion Skill required at runtime", async () => {
     const installedPackage = JSON.parse(await readFile(path.join(consumer, "node_modules", "idea-finder", "package.json"), "utf8")) as { bin: Record<string, string>; dependencies?: object };
     expect(installedPackage.bin).toEqual({ "idea-finder": "./dist/idea-finder.js" });
     expect(installedPackage.dependencies).toBeUndefined();
+    const installedSkill = await readFile(path.join(consumer, "node_modules", "idea-finder", "skills", "idea-finder", "SKILL.md"), "utf8");
+    expect(installedSkill).toContain("name: idea-finder");
+    expect(installedSkill).not.toContain("TODO");
+    const unrelatedCwd = await mkdtemp(path.join(os.tmpdir(), "idea-finder-path-"));
+    try {
+      const bare = await exec("idea-finder", ["workspace", "diagnostics", "--workspace", path.join(unrelatedCwd, "workspace"), "--json"], { cwd: unrelatedCwd, env: { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` } });
+      expect((JSON.parse(bare.stdout) as CliMachineEnvelope).status).toBe("success");
+    } finally { await rm(unrelatedCwd, { recursive: true, force: true }); }
   });
 });

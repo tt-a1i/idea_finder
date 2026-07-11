@@ -45,7 +45,7 @@ function usage(): string {
 
 Usage:
   idea-finder workspace diagnostics
-  idea-finder brief create <slug> --title <text> [--description <text>] [--lens <l1,l2>] [--manual-import <text> ...]
+  idea-finder brief create <slug> --title <text> [--description <text>] [--lens <l1,l2>] [--source <hn|v2ex|app_store|stack_exchange> ...] [--term <text> ...] [--app-id <id>] [--stackexchange-site <site>] [--manual-import <text> ...]
   idea-finder brief list
   idea-finder run <brief> [--fixture]
   idea-finder run <brief> --retry <runId>
@@ -148,7 +148,7 @@ interface ArgumentShape {
 
 const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
-  "brief create": { valueFlags: ["--title", "--description", "--lens", "--manual-import", "--github-repo", "--google-subject", "--google-geo", "--npm-package", "--pypi-package", "--from", "--to"], positionalCount: 3 },
+  "brief create": { valueFlags: ["--title", "--description", "--lens", "--source", "--term", "--app-id", "--stackexchange-site", "--manual-import", "--github-repo", "--google-subject", "--google-geo", "--npm-package", "--pypi-package", "--from", "--to"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
   run: { valueFlags: ["--retry", "--resume", "--fixture-source-outcome"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
   inbox: { valueFlags: ["--brief"], positionalCount: 1 },
@@ -230,6 +230,16 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const title = required(flag(rest, "--title"), "brief.title_required", "--title is required");
     const lensesRaw = flag(rest, "--lens");
     const manualImports = flags(rest, "--manual-import").map((text) => ({ text }));
+    const qualitativeSources = flags(rest, "--source").map((source) => oneOf(source, ["hn", "v2ex", "app_store", "stack_exchange"] as const, "source"));
+    const searchTerms = flags(rest, "--term");
+    const effectiveTerms = searchTerms.length > 0 ? searchTerms : (lensesRaw?.split(",").map((item) => item.trim()).filter(Boolean) ?? title.split(/\s+/).filter((item) => item.length > 2));
+    const appId = flag(rest, "--app-id");
+    const stackExchangeSite = flag(rest, "--stackexchange-site");
+    if (searchTerms.length > 0 && qualitativeSources.length === 0) usageFailure("brief.source_required_for_terms", "--term requires at least one --source");
+    if (appId && !qualitativeSources.includes("app_store")) usageFailure("brief.app_store_source_required", "--app-id requires --source app_store");
+    if (stackExchangeSite && !qualitativeSources.includes("stack_exchange")) usageFailure("brief.stack_exchange_source_required", "--stackexchange-site requires --source stack_exchange");
+    if (qualitativeSources.includes("app_store") && !appId) usageFailure("brief.app_id_required", "app_store source requires --app-id");
+    const searches = qualitativeSources.map((platform) => ({ platform, terms: effectiveTerms.length ? effectiveTerms : [title], ...(platform === "app_store" ? { appId } : {}), ...(platform === "stack_exchange" && stackExchangeSite ? { stackExchangeSite } : {}) }));
     const github = flags(rest, "--github-repo").map((repository) => ({ repository }));
     const googleSubjects = flags(rest, "--google-subject");
     const npmPackages = flags(rest, "--npm-package");
@@ -248,7 +258,8 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       title,
       description: flag(rest, "--description") ?? "",
       lenses: lensesRaw?.split(",").map((item) => item.trim()),
-      queryPlan: manualImports.length > 0 || quantitative ? { harvestMode: "manual", manualImports, quantitative } : undefined,
+      sourcesEnabled: qualitativeSources.length > 0 ? qualitativeSources : undefined,
+      queryPlan: searches.length > 0 || manualImports.length > 0 || quantitative ? { harvestMode: searches.length > 0 ? "l0" : "manual", searches, manualImports, quantitative } : undefined,
     });
     return { command: "brief create", data: { brief }, human: `Created brief ${brief.slug} (${brief.id})` };
   }
