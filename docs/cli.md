@@ -24,6 +24,23 @@ The packed root package contains a bundled `idea-finder` executable and does not
 require this repository or its npm scripts at runtime. During repository
 development, `npm link` exposes the same executable.
 
+### Clean-install release smoke
+
+From a clean checkout, this deterministic command builds and packs the package,
+installs it offline into a temporary consumer, invokes its real `idea-finder`
+binary from outside the repository, runs a representative five-lane research
+fixture, and inspects the persisted result. It also evaluates the packaged Skill:
+
+```bash
+npm ci
+npm run release:smoke
+```
+
+The complete pull-request release gate is `npm run release:gate`. It runs root
+typechecking and the full deterministic fixture suite without live network
+access. A maintainer may separately run `npm run test:live-smoke`; that optional
+HN probe is never part of the release gate and does not affect release status.
+
 ## Usage
 
 Default workspace directory: `data/workspace/` (gitignored).

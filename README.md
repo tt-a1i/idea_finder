@@ -4,7 +4,7 @@ Local-first, evidence-native personal demand workspace (implementation in progre
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22.5+
 
 ## Scripts
 

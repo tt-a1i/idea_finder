@@ -57,12 +57,13 @@ describe("installed standalone CLI", () => {
   let consumer: string;
   let executable: string;
   let workspace: string;
+  let packedFiles: string[];
 
   beforeAll(async () => {
     const packDirectory = await mkdtemp(path.join(os.tmpdir(), "idea-finder-pack-"));
-    await exec("npm", ["run", "build"], { cwd: repositoryRoot });
     const packed = await exec("npm", ["pack", "--pack-destination", packDirectory, "--json"], { cwd: repositoryRoot });
-    const packResult = JSON.parse(packed.stdout) as Array<{ filename: string }>;
+    const packResult = JSON.parse(packed.stdout) as Array<{ filename: string; files: Array<{ path: string }> }>;
+    packedFiles = packResult[0]!.files.map((file) => file.path).sort();
     const tarball = path.join(packDirectory, packResult[0]!.filename);
 
     consumer = await mkdtemp(path.join(os.tmpdir(), "idea-finder-consumer-"));
@@ -71,6 +72,20 @@ describe("installed standalone CLI", () => {
     executable = path.join(consumer, "node_modules", ".bin", "idea-finder");
     workspace = path.join(consumer, "workspace");
   }, 30_000);
+
+  it("ships only the executable, package metadata, README, and companion Skill assets", () => {
+    expect(packedFiles).toEqual([
+      "README.md",
+      "dist/idea-finder.js",
+      "package.json",
+      "skills/idea-finder/SKILL.md",
+      "skills/idea-finder/agents/openai.yaml",
+      "skills/idea-finder/evals/cases.json",
+      "skills/idea-finder/evals/traces.json",
+      "skills/idea-finder/references/cli-workflows.md",
+    ]);
+    expect(packedFiles.some((file) => /(^|\/)(?:data|\.scratch|node_modules)(\/|$)|\.env|secret|credential/i.test(file))).toBe(false);
+  });
 
   it("installs into a clean consumer and exposes diagnostics plus Brief create/list", async () => {
     const diagnostics = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);

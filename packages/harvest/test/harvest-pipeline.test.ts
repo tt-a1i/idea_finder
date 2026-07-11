@@ -140,7 +140,9 @@ describe("harvest pipeline", () => {
   });
 });
 
-describe.skip("live smoke (optional)", () => {
+const describeLive = process.env.IDEA_FINDER_LIVE_SMOKE === "1" ? describe : describe.skip;
+
+describeLive("live smoke (optional)", () => {
   it("hits HN Algolia with real network", async () => {
     const connector = createHnAlgoliaConnector();
     const docs = [];
