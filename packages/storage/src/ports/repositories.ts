@@ -16,6 +16,10 @@ import type {
   PackageDownloadMetric,
   PackageEcosystem,
   GoogleTrendsNormalizationContext,
+  MultiLaneSummaryV1,
+  ResearchClaim,
+  EvidenceIndependenceRecord,
+  FollowUpHuntingTaskProposal,
 } from "@idea-finder/core";
 
 export interface ResearchRunRepository {
@@ -35,6 +39,7 @@ export interface RunScopedRepository<T extends { id: string }> {
   save(runId: ResearchRunId, entity: T): void;
   get(runId: ResearchRunId, id: string): T | null;
   listByRun(runId: ResearchRunId): T[];
+  delete(runId: ResearchRunId, id: string): void;
 }
 
 export type RawDocumentRepository = RunScopedRepository<RawDocument>;
@@ -85,6 +90,37 @@ export interface TrendEventRepository {
   get(id: string): TrendEvent | null;
   listBySeries(seriesId: string): TrendEvent[];
   deleteBySeries(seriesId: string): void;
+}
+
+export interface StoredMultiLaneReportRecord {
+  readonly id: string;
+  readonly runId: ResearchRunId;
+  readonly briefId: string;
+  readonly summary: MultiLaneSummaryV1;
+  readonly claims: readonly ResearchClaim[];
+  readonly candidateIds: readonly string[];
+  readonly seriesSnapshots: readonly TrendSeries[];
+  readonly observationSnapshots: readonly MetricObservation[];
+}
+
+export interface MultiLaneReportRepository {
+  save(record: StoredMultiLaneReportRecord): void;
+  getByRun(runId: ResearchRunId): StoredMultiLaneReportRecord | null;
+  listByClaim(claimId: string): StoredMultiLaneReportRecord[];
+}
+
+export interface EvidenceIndependenceRepository {
+  saveIndex(runId: ResearchRunId, records: readonly EvidenceIndependenceRecord[]): void;
+  save(runId: ResearchRunId, record: EvidenceIndependenceRecord): void;
+  getByDocument(runId: ResearchRunId, documentId: string): EvidenceIndependenceRecord | null;
+  listByRun(runId: ResearchRunId): EvidenceIndependenceRecord[];
+  listByGroup(runId: ResearchRunId, groupId: string): EvidenceIndependenceRecord[];
+}
+
+export interface FollowUpProposalRepository {
+  save(runId: ResearchRunId, proposal: FollowUpHuntingTaskProposal): void;
+  get(runId: ResearchRunId, id: string): FollowUpHuntingTaskProposal | null;
+  listByRun(runId: ResearchRunId): FollowUpHuntingTaskProposal[];
 }
 
 export interface PipelineStepStore {

@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
-import { asId, buildGoogleTrendSeries, buildPackageDownloadSeries, classifySearchMomentum, createGoogleTrendsObservation, createPackageDownloadObservation, detectLatestPackageDownloadEvent } from "@idea-finder/core";
+import { asId, buildExactDuplicateIndependenceIndex, buildGoogleTrendSeries, buildMultiLaneSummary, buildPackageDownloadSeries, buildResearchClaim, classifySearchMomentum, createGoogleTrendsObservation, createPackageDownloadObservation, detectLatestPackageDownloadEvent, proposeFollowUpHuntingTask } from "@idea-finder/core";
 import type { GoogleTrendsNormalizationContext, MetricObservation, ResearchRun, TrendEvent, TrendSeries } from "@idea-finder/core";
 
 import { openLocalStorage } from "./index.js";
@@ -404,7 +404,7 @@ describe("@idea-finder/storage local persistence", () => {
       id: asId(`gobs_${normalization.geography}_${index}`),
       subject: { kind: "search_term", externalId: "ai agent", url: "https://trends.google.com/trends/explore?q=ai%20agent" },
       context: normalization, observedAt: `2026-07-0${index + 1}T00:00:00.000Z`, rawValue: value, normalizedValue: value,
-      provenance: { collector: "fixture", collectorVersion: "1", interface: "recorded_fixture", sourceRef: "fixture", collectedAt: "2026-07-11T00:00:00.000Z" },
+      provenance: { collector: "fixture", collectorVersion: "1", interface: "recorded_fixture", sourceRef: "fixture", collectedAt: "2026-07-11T00:00:00.000Z", caveat: "fixture" },
     });
     try {
       const storage = openLocalStorage({ dataDir });
@@ -487,6 +487,83 @@ describe("@idea-finder/storage local persistence", () => {
       expect(restarted.trendSeries.list({ ecosystem: "pypi", packageName: "foo-bar", windowStartAt: built.series.startedAt, windowEndAt: built.series.endedAt })).toEqual([built.series]);
       expect(restarted.trendEvents.listBySeries(built.series.id)).toEqual([event]);
       expect(restarted.quantitativeSourceStatuses.get("pypi:foo-bar")).toMatchObject({ status: "partial", ecosystem: "pypi", packageName: "foo-bar" });
+      restarted.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists referenced multi-lane reports, independence groups, and follow-ups", () => {
+    const dataDir = tempDataDir();
+    const run = { ...sampleRun(), id: asId("run_multi"), huntingTaskId: asId("task_multi") };
+    const rawDocument = (id: string, body: string) => ({
+      id: asId(id), sourceTier: "L1" as const, platform: "manual", externalId: id, url: `https://example.test/${id}`,
+      fetchedAt: "2026-07-11T00:00:00.000Z", fetchMethod: "import" as const, fetchAgentRunId: null,
+      contentType: "page" as const, rawBody: body, huntingTaskId: run.huntingTaskId,
+      retentionClass: "pinned" as const, legalBasis: "user_provided" as const,
+    });
+    const packageObservation = (index: number, downloads: number) => createPackageDownloadObservation({
+      id: asId(`multi_pkg_${index}`), ecosystem: "npm", packageName: "multi-lane", downloads,
+      bucket: { startAt: new Date(Date.UTC(2026, 0, 1 + index * 7)).toISOString(), endAt: new Date(Date.UTC(2026, 0, 8 + index * 7)).toISOString(), resolution: "week", timezone: "UTC", coverageDays: 7, partial: false },
+      provenance: { collector: "fixture", collectorVersion: "1", interface: "recorded_fixture", sourceRef: "fixture", collectedAt: "2026-07-11T00:00:00.000Z" },
+    });
+    try {
+      const storage = openLocalStorage({ dataDir });
+      storage.researchRuns.save(run);
+      const docA = rawDocument("doc_multi_a", "independent A");
+      const docB = rawDocument("doc_multi_b", "independent B");
+      const docC = rawDocument("doc_multi_c", "rollback C");
+      storage.rawDocuments.save(run.id, docA);
+      storage.rawDocuments.save(run.id, docB);
+      storage.rawDocuments.save(run.id, docC);
+      const chunk = { id: asId("chunk_multi"), documentId: docA.id, text: docA.rawBody, spanStart: 0, spanEnd: docA.rawBody.length };
+      storage.chunks.save(run.id, chunk);
+      const evidence = {
+        id: asId("evidence_multi"), clusterId: asId("cluster_multi"), opportunityId: null, rawSignalId: asId("signal_multi"),
+        documentId: docA.id, chunkId: chunk.id, platform: "manual", url: docA.url, linkStatus: "ok" as const,
+        quoteVerbatim: chunk.text, supportsClaim: "pain", strength: "primary" as const, userVerified: true,
+        provenance: { createdBy: "pipeline" as const, agentRunId: null }, fetchedAt: docA.fetchedAt,
+      };
+      storage.evidenceItems.save(run.id, evidence);
+      const first = packageObservation(0, 70); const second = packageObservation(1, 140);
+      storage.metricObservations.save(first); storage.metricObservations.save(second);
+      const built = buildPackageDownloadSeries(asId("multi_series"), [first, second]);
+      storage.trendSeries.save(built.series);
+      const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: "2026-07-11T00:00:00.000Z" })!;
+      storage.trendEvents.append(event);
+      const independence = buildExactDuplicateIndependenceIndex([docA, docB, docC].map((document) => ({ documentId: document.id, content: document.rawBody })));
+      const independenceA = independence.records.find((item) => item.documentId === docA.id)!;
+      const independenceB = independence.records.find((item) => item.documentId === docB.id)!;
+      const independenceC = independence.records.find((item) => item.documentId === docC.id)!;
+      storage.evidenceIndependence.save(run.id, independenceA);
+      storage.evidenceIndependence.save(run.id, independenceB);
+      const claim = buildResearchClaim({
+        id: "claim_multi", lane: "qualitative_demand", statement: chunk.text, status: "validated",
+        evidenceRefs: [{ kind: "text_quote", evidenceItemId: evidence.id, chunkId: chunk.id, documentId: docA.id, url: docA.url }],
+        independentSourceGroupIds: [independenceA.independenceGroupId], limitations: [],
+      });
+      const summary = buildMultiLaneSummary({ briefId: run.huntingTaskId, runId: run.id, claims: [claim] });
+      const report = { id: run.id, runId: run.id, briefId: run.huntingTaskId, summary, claims: [claim], candidateIds: [], seriesSnapshots: [built.series], observationSnapshots: [first, second] };
+      storage.multiLaneReports.save(report);
+      const proposal = proposeFollowUpHuntingTask({ triggerEventId: event.id, triggerSeriesId: built.series.id, triggerKind: "momentum_up", subject: "multi-lane" });
+      storage.followUpProposals.save(run.id, proposal);
+      expect(storage.multiLaneReports.listByClaim(claim.id)).toEqual([report]);
+      expect(storage.evidenceIndependence.listByGroup(run.id, independenceA.independenceGroupId)).toEqual([independenceA]);
+      expect(() => storage.multiLaneReports.save({ ...report, briefId: "task_wrong" })).toThrow("identity conflicts");
+      expect(() => storage.multiLaneReports.save({ ...report, summary: { ...summary, lanes: { ...summary.lanes, qualitative_demand: { ...summary.lanes.qualitative_demand, totalClaims: 99 } } } })).toThrow("summary conflicts");
+      expect(() => storage.evidenceIndependence.save(run.id, { ...independenceB, independenceGroupId: independenceA.independenceGroupId })).toThrow("canonical documents");
+      expect(() => storage.followUpProposals.save(run.id, { ...proposal, subject: "forged" })).toThrow("canonical Core proposal");
+      expect(() => storage.followUpProposals.save(run.id, { ...proposal, status: "created", createdBriefId: asId("task_forged"), createdAt: "2026-07-11T00:00:00.000Z" })).toThrow("invalid trend origin");
+      expect(() => storage.transaction(() => {
+        storage.evidenceIndependence.save(run.id, independenceC);
+        throw new Error("multi rollback");
+      })).toThrow("multi rollback");
+      expect(storage.evidenceIndependence.listByGroup(run.id, independenceC.independenceGroupId)).toEqual([]);
+      storage.close();
+      const restarted = openLocalStorage({ dataDir });
+      expect(restarted.multiLaneReports.getByRun(run.id)).toEqual(report);
+      expect(restarted.evidenceIndependence.listByRun(run.id)).toEqual([independenceA, independenceB]);
+      expect(restarted.followUpProposals.listByRun(run.id)).toEqual([proposal]);
       restarted.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });

@@ -149,6 +149,29 @@ Counts are normalized to downloads per covered day and remain developer-adoption
 evidence only. Rate limits, missing packages, unavailable history, and response
 drift are persisted as structured source-health states rather than zero counts.
 
+## Multi-lane research
+
+A Brief can explicitly combine qualitative evidence with Google Trends, GitHub,
+npm, and PyPI requests. The report keeps qualitative demand, trend momentum,
+supply/competition, commercial intent, and contradictory evidence separate:
+
+```bash
+idea-finder brief create agent-demand --title "Agent demand" \
+  --manual-import "This workaround is painful" \
+  --google-subject "agent coding" --google-geo US \
+  --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool \
+  --from 2026-01-01 --to 2026-01-10 --json
+idea-finder research run agent-demand --fixture-set representative --json
+idea-finder research inspect <runId> --json
+idea-finder research follow-up <runId> --proposal <id> --create agent-demand-followup --json
+```
+
+The summary has schema version `1` and no aggregate score. Every claim resolves
+to stored quote, observation-series, ranking, or source-URL references. Exact
+duplicate text is grouped before corroboration gates are evaluated.
+Trend/star/ranking/download-only candidates remain visibly `unvalidated`;
+trend anomalies only propose follow-up research and never create an Opportunity.
+
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an
 unambiguous list-to-inspect path across Briefs and historical runs. Commands

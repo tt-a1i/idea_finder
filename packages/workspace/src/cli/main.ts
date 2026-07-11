@@ -67,6 +67,9 @@ Usage:
   idea-finder trends observations [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends series [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends events [--subject <owner/repository>] [--metric <metric>]
+  idea-finder research run <brief> [--fixture-set representative]
+  idea-finder research inspect <runId> [--claim <claimId>]
+  idea-finder research follow-up <runId> --proposal <id> --create <slug>
   idea-finder export <brief> [--out <path.md>]
   idea-finder agent list
   idea-finder agent create --kind <research|browser|computer|coding> --intent <text> [--opportunity <id>] [--evidence <id,id>] [--domain-write] [--dry-run]
@@ -142,7 +145,7 @@ interface ArgumentShape {
 
 const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
-  "brief create": { valueFlags: ["--title", "--description", "--lens", "--manual-import"], positionalCount: 3 },
+  "brief create": { valueFlags: ["--title", "--description", "--lens", "--manual-import", "--github-repo", "--google-subject", "--google-geo", "--npm-package", "--pypi-package", "--from", "--to"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
   run: { valueFlags: ["--retry", "--resume"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
   inbox: { valueFlags: ["--brief"], positionalCount: 1 },
@@ -160,6 +163,9 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
+  "research run": { valueFlags: ["--fixture-set"], positionalCount: 3 },
+  "research inspect": { valueFlags: ["--claim"], positionalCount: 3 },
+  "research follow-up": { valueFlags: ["--proposal", "--create"], positionalCount: 3 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
   "agent list": { valueFlags: [], positionalCount: 2 },
   "agent create": { valueFlags: ["--kind", "--intent", "--opportunity", "--evidence"], booleanFlags: ["--domain-write", "--dry-run"], positionalCount: 2 },
@@ -220,12 +226,25 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const title = required(flag(rest, "--title"), "brief.title_required", "--title is required");
     const lensesRaw = flag(rest, "--lens");
     const manualImports = flags(rest, "--manual-import").map((text) => ({ text }));
+    const github = flags(rest, "--github-repo").map((repository) => ({ repository }));
+    const googleSubjects = flags(rest, "--google-subject");
+    const npmPackages = flags(rest, "--npm-package");
+    const pypiPackages = flags(rest, "--pypi-package");
+    const from = flag(rest, "--from");
+    const to = flag(rest, "--to");
+    if ((googleSubjects.length || npmPackages.length || pypiPackages.length) && (!from || !to)) usageFailure("brief.quantitative_window_required", "Google/npm/PyPI sources require --from and --to");
+    const geography = googleSubjects.length ? required(flag(rest, "--google-geo"), "brief.google_geo_required", "Google Trends requires --google-geo") : undefined;
+    const quantitative = github.length || googleSubjects.length || npmPackages.length || pypiPackages.length ? {
+      github,
+      googleTrends: googleSubjects.map((subject) => ({ subject, geography: geography!, from: from!, to: to!, granularity: "day" as const })),
+      packages: [...npmPackages.map((pkg) => ({ ecosystem: "npm" as const, package: pkg, from: from!, to: to! })), ...pypiPackages.map((pkg) => ({ ecosystem: "pypi" as const, package: pkg, from: from!, to: to! }))],
+    } : undefined;
     const brief = await svc(workspaceDir).createBrief({
       slug,
       title,
       description: flag(rest, "--description") ?? "",
       lenses: lensesRaw?.split(",").map((item) => item.trim()),
-      queryPlan: manualImports.length > 0 ? { harvestMode: "manual", manualImports } : undefined,
+      queryPlan: manualImports.length > 0 || quantitative ? { harvestMode: "manual", manualImports, quantitative } : undefined,
     });
     return { command: "brief create", data: { brief }, human: `Created brief ${brief.slug} (${brief.id})` };
   }
@@ -460,6 +479,28 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const subject = required(rest[1], "trends.subject_required", "trends inspect google requires <subject>");
     const result = svc(workspaceDir).inspectGoogleTrends({ subject, geography: flag(rest, "--geo"), from: flag(rest, "--from"), to: flag(rest, "--to") });
     return { command: "trends inspect", data: result, human: `Google Trends: ${result.observations.length} observations, ${result.events.length} events` };
+  }
+
+  if (cmd === "research" && sub === "run") {
+    const brief = required(rest[0], "research.brief_required", "research run requires <brief>");
+    const fixtureSetRaw = flag(rest, "--fixture-set");
+    const fixtureSet = fixtureSetRaw ? oneOf(fixtureSetRaw, ["representative"] as const, "fixture-set") : undefined;
+    const report = await svc(workspaceDir).runMultiLaneResearch(brief, { fixtureSet });
+    return { command: "research run", data: { summary: report.summary, runId: report.runId }, human: `Multi-lane research ${report.runId}: ${report.claims.length} claims; ${report.summary.candidates.filter((item) => item.status === "unvalidated").length} unvalidated candidates` };
+  }
+
+  if (cmd === "research" && sub === "inspect") {
+    const runId = required(rest[0], "research.run_required", "research inspect requires <runId>");
+    const result = svc(workspaceDir).inspectMultiLaneResearch(runId as never, flag(rest, "--claim"));
+    return { command: "research inspect", data: { runId, summary: result.report.summary, claims: result.claims, details: result.details, independence: result.independence, proposals: result.proposals }, human: `Research ${runId}: ${result.claims.length} claims, ${result.details.length} evidence details` };
+  }
+
+  if (cmd === "research" && sub === "follow-up") {
+    const runId = required(rest[0], "research.run_required", "research follow-up requires <runId>");
+    const proposalId = required(flag(rest, "--proposal"), "research.proposal_required", "research follow-up requires --proposal");
+    const slug = required(flag(rest, "--create"), "research.create_required", "research follow-up requires --create <slug>");
+    const brief = await svc(workspaceDir).createFollowUpBrief(runId as never, proposalId, slug);
+    return { command: "research follow-up", data: { brief, proposalId, parentRunId: runId }, human: `Created follow-up brief ${brief.slug} from ${proposalId}` };
   }
 
   if (cmd === "trends" && ["observations", "series", "events"].includes(sub ?? "")) {

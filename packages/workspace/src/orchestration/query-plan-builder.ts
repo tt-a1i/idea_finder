@@ -72,6 +72,7 @@ export function effectiveResearchConfig(brief: HuntingBrief): Readonly<Record<st
         url: item.url ?? null,
         title: item.title ?? null,
       })),
+      quantitative: brief.queryPlan?.quantitative ?? null,
     },
   };
 }

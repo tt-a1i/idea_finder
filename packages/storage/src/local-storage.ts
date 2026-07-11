@@ -34,6 +34,9 @@ import type {
   TrendEventRepository,
   TrendSeriesRepository,
   NormalizationContextRepository,
+  MultiLaneReportRepository,
+  EvidenceIndependenceRepository,
+  FollowUpProposalRepository,
 } from "./ports/repositories.js";
 import { createPipelineStepStore } from "./sqlite/pipeline-step-store.js";
 import { createJsonEntityRepository } from "./sqlite/json-entity-repository.js";
@@ -43,6 +46,7 @@ import { createResearchRunRepository } from "./sqlite/research-run-repository.js
 import { createRunScopedRepository } from "./sqlite/run-scoped-repository.js";
 import { initSchema } from "./sqlite/schema.js";
 import { createMetricObservationRepository, createNormalizationContextRepository, createTrendEventRepository, createTrendSeriesRepository } from "./sqlite/quantitative-repositories.js";
+import { createEvidenceIndependenceRepository, createFollowUpProposalRepository, createMultiLaneReportRepository } from "./sqlite/multi-lane-repositories.js";
 
 export interface LocalStorageOptions {
   /** Directory containing idea_finder.db and blobs/ (e.g. ./data). */
@@ -110,6 +114,9 @@ export interface LocalStorage {
   readonly trendSeries: TrendSeriesRepository;
   readonly trendEvents: TrendEventRepository;
   readonly quantitativeSourceStatuses: JsonEntityRepository<StoredQuantitativeSourceStatusRecord>;
+  readonly multiLaneReports: MultiLaneReportRepository;
+  readonly evidenceIndependence: EvidenceIndependenceRepository;
+  readonly followUpProposals: FollowUpProposalRepository;
   readonly libraryAdmissionResults: RunScopedRepository<StoredAdmissionResultRecord>;
   readonly sourceStatuses: RunScopedRepository<StoredSourceStatusRecord>;
   readonly researchRuns: ResearchRunRepository;
@@ -149,6 +156,9 @@ export function openLocalStorage(options: LocalStorageOptions): LocalStorage {
     trendSeries: createTrendSeriesRepository(db),
     trendEvents: createTrendEventRepository(db),
     quantitativeSourceStatuses: createJsonEntityRepository(db, "quantitative_source_statuses"),
+    multiLaneReports: createMultiLaneReportRepository(db),
+    evidenceIndependence: createEvidenceIndependenceRepository(db),
+    followUpProposals: createFollowUpProposalRepository(db),
     libraryAdmissionResults: createRunScopedRepository(db, "library_admission_results"),
     sourceStatuses: createRunScopedRepository(db, "source_statuses"),
     researchRuns: createResearchRunRepository(db),

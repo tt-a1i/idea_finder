@@ -61,6 +61,11 @@ export interface BriefQueryPlan {
   readonly harvestMode?: "manual" | "l0";
   readonly searches?: readonly BriefSourceSearch[];
   readonly manualImports?: readonly ManualImportConfig[];
+  readonly quantitative?: {
+    readonly googleTrends?: readonly { readonly subject: string; readonly geography: string; readonly from: string; readonly to: string; readonly granularity: "day" | "week" }[];
+    readonly github?: readonly { readonly repository: string; readonly since?: string }[];
+    readonly packages?: readonly { readonly ecosystem: "npm" | "pypi"; readonly package: string; readonly from: string; readonly to: string }[];
+  };
 }
 
 /** Local hunting brief — config for a demand research workspace slice. */
@@ -74,6 +79,7 @@ export interface HuntingBrief {
   readonly successCriteria: string;
   readonly createdAt: string;
   readonly queryPlan?: BriefQueryPlan;
+  readonly origin?: { readonly kind: "trend_anomaly"; readonly parentRunId: string; readonly trendEventId: string; readonly trendSeriesId: string };
 }
 
 export interface InboxSignalSummary {

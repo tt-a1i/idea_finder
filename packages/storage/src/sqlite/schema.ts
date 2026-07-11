@@ -119,6 +119,38 @@ CREATE TABLE IF NOT EXISTS normalization_contexts (
   payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS multi_lane_reports (
+  run_id TEXT PRIMARY KEY,
+  brief_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS multi_lane_report_claims (
+  run_id TEXT NOT NULL,
+  claim_id TEXT NOT NULL,
+  PRIMARY KEY (run_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS idx_multi_lane_report_claims_claim ON multi_lane_report_claims (claim_id, run_id);
+
+CREATE TABLE IF NOT EXISTS evidence_independence (
+  run_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  independence_group_id TEXT NOT NULL,
+  content_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_independence_run_group ON evidence_independence (run_id, independence_group_id);
+
+CREATE TABLE IF NOT EXISTS follow_up_proposals (
+  run_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  trigger_series_id TEXT NOT NULL,
+  trigger_event_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_follow_up_proposals_run ON follow_up_proposals (run_id, id);
+
 CREATE TABLE IF NOT EXISTS raw_documents (
   id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,

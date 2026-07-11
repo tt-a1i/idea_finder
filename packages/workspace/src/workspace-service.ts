@@ -1,5 +1,6 @@
 import {
   applyCalibration,
+  admitToLibrary,
   asId,
   completeValidationExperiment as applyValidationCompletion,
   computeMonitorDiff as buildMonitorDiff,
@@ -11,6 +12,11 @@ import {
   canonicalizePackageName,
   createPackageDownloadObservation,
   detectLatestPackageDownloadEvent,
+  buildExactDuplicateIndependenceIndex,
+  buildMultiLaneSummary,
+  buildResearchClaim,
+  evaluateMultiLaneCandidate,
+  proposeFollowUpHuntingTask,
   createGitHubMetricObservation,
   createGoogleTrendsObservation,
   detectLatestTrendEvent,
@@ -19,7 +25,7 @@ import {
 import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, createNpmDownloadsConnector, createPyPiDownloadsConnector, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { openLocalStorage, type LocalStorage } from "@idea-finder/storage";
+import { openLocalStorage, type LocalStorage, type StoredMultiLaneReportRecord } from "@idea-finder/storage";
 import type {
   ActorKind,
   CalibrationAction,
@@ -39,6 +45,10 @@ import type {
   PackageDownloadObservation,
   PackageDownloadSeries,
   PackageEcosystem,
+  ResearchClaim,
+  ResearchLane,
+  MultiLaneCandidate,
+  FollowUpHuntingTaskProposal,
   Opportunity,
   RawSignal,
   ResearchRunId,
@@ -437,6 +447,7 @@ export class WorkspaceService {
     sourcesEnabled?: string[];
     successCriteria?: string;
     queryPlan?: HuntingBrief["queryPlan"];
+    origin?: HuntingBrief["origin"];
   }): Promise<HuntingBrief> {
     const brief: HuntingBrief = {
       id: asId<HuntingTaskId>(`task_${input.slug}`),
@@ -448,6 +459,7 @@ export class WorkspaceService {
       successCriteria: input.successCriteria ?? "3+ cross-source corroborated signals",
       createdAt: new Date().toISOString(),
       queryPlan: input.queryPlan,
+      origin: input.origin,
     };
     await this.migrateLegacyBriefs();
     const storage = this.openCanonical();
@@ -1154,6 +1166,202 @@ export class WorkspaceService {
     } finally {
       storage.close();
     }
+  }
+
+  async runMultiLaneResearch(briefRef: string, options: { fixtureSet?: "representative" } = {}): Promise<StoredMultiLaneReportRecord> {
+    const brief = await this.getBrief(briefRef);
+    if (!brief) throw new Error(`Brief not found: ${briefRef}`);
+    const stored = await this.runResearch(briefRef);
+    const fixture = options.fixtureSet === "representative";
+    const plan = brief.queryPlan?.quantitative;
+    if (!plan) throw new Error(`Brief has no quantitative research plan: ${briefRef}`);
+
+    const independence = buildExactDuplicateIndependenceIndex(stored.documents.map((document) => ({ documentId: document.id, content: document.rawBody })));
+    const groupByDocument = independence.independenceGroupByDocumentId;
+    const admission = admitToLibrary(
+      stored.drafts,
+      new Map(stored.evidence.map((item) => [item.id, item])),
+      new Map(stored.chunks.map((item) => [item.id, item])),
+      new Map(stored.signals.map((item) => [item.id, item])),
+      { independenceGroupByDocumentId: groupByDocument },
+    );
+    const canonicalAdmission = this.openCanonical();
+    const retracted: Opportunity[] = [];
+    try {
+      canonicalAdmission.transaction(() => {
+        canonicalAdmission.evidenceIndependence.saveIndex(stored.run.id, independence.records);
+        const admittedIds = new Set(admission.admitted.map((item) => item.id));
+        for (const existing of canonicalAdmission.opportunities.listByRun(stored.run.id)) {
+          if (!admittedIds.has(existing.id)) retracted.push(existing);
+          canonicalAdmission.opportunities.delete(stored.run.id, existing.id);
+        }
+        for (const opportunity of admission.admitted) canonicalAdmission.opportunities.save(stored.run.id, opportunity);
+        for (const draft of stored.drafts) {
+          const opportunity = admission.admitted.find((item) => item.id === `opp_${draft.id}`);
+          const rejection = admission.rejected.find((item) => item.draftId === draft.id);
+          canonicalAdmission.libraryAdmissionResults.save(stored.run.id, { id: draft.id, decision: opportunity ? "admitted" : "rejected", opportunityId: opportunity?.id ?? null, issues: rejection?.issues ?? [] });
+        }
+      });
+      for (const opportunity of retracted) await canonicalAdmission.audit.append({
+        at: new Date().toISOString(), actor: "system", action: "opportunity.reject", resource: opportunity.id,
+        payload: { runId: stored.run.id, reason: "independence_recalculation", corrective: true },
+      });
+    } finally { canonicalAdmission.close(); }
+    const claims: ResearchClaim[] = stored.evidence.map((evidence) => {
+      const lane: ResearchLane = evidence.supportsClaim === "wtp" ? "commercial_intent" : evidence.supportsClaim === "disconfirming" ? "contradictory_evidence" : "qualitative_demand";
+      return buildResearchClaim({
+        id: `claim_${stored.run.id}_${evidence.id}`,
+        lane,
+        statement: evidence.quoteVerbatim,
+        status: lane === "contradictory_evidence" ? "contradicted" : "validated",
+        evidenceRefs: [{ kind: "text_quote", evidenceItemId: evidence.id, chunkId: evidence.chunkId, documentId: evidence.documentId, url: evidence.url }],
+        independentSourceGroupIds: groupByDocument.get(evidence.documentId) ? [groupByDocument.get(evidence.documentId)!] : [],
+        limitations: [],
+      });
+    });
+    const quantitativeSeries: TrendSeries[] = [];
+    const quantitativeObservations: MetricObservation[] = [];
+    const githubStarObservations: Array<{ repository: string; observation: GitHubMetricObservation }> = [];
+    const followUps: FollowUpHuntingTaskProposal[] = [];
+
+    for (const request of plan.googleTrends ?? []) {
+      const transport: GoogleTrendsTransport | undefined = fixture ? {
+        async query(query) {
+          const values = [10, 15, 22, 35, 55, 80];
+          const start = Date.parse(query.from);
+          const step = query.granularity === "week" ? 7 * 86_400_000 : 86_400_000;
+          return { payload: { rows: values.map((value, index) => ({ time: new Date(start + index * step).toISOString(), value, partial: false })), comparisonSet: [query.subject], anchor: null }, provenance: { transport: "representative-fixture", transportVersion: "1", authorizedInterface: "recorded_fixture", sourceRef: "fixture://multi-lane/google", retrievedAt: query.to } };
+        },
+      } : undefined;
+      const result = await this.collectGoogleTrends({ ...request, transport });
+      quantitativeSeries.push(result.series);
+      quantitativeObservations.push(...result.observations);
+      claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "trend_momentum", statement: `${request.subject}: ${result.event.kind}`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Search momentum is not validated demand"] }));
+      if (["spike", "sustained_growth"].includes(result.event.kind)) followUps.push(proposeFollowUpHuntingTask({ triggerEventId: result.event.id, triggerSeriesId: result.series.id, triggerKind: result.event.kind as "spike" | "sustained_growth", subject: request.subject }));
+    }
+    for (const request of plan.github ?? []) {
+      const connector: QuantitativeConnector | undefined = fixture ? {
+        source: "github", async healthcheck() { return { ok: true }; }, async collect() {
+          const observedAt = "2026-01-10T00:00:00.000Z";
+          const provenance = { url: `https://api.github.com/repos/${request.repository}`, endpoint: "/repos/{owner}/{repo}", apiVersion: "2022-11-28", retrievedAt: observedAt };
+          return [["github.repository.stars", 120], ["github.repository.forks", 18], ["github.repository.open_issues", 7], ["github.issue.opened", 4], ["github.issue.closed", 3], ["github.repository.contributors", 12]].map(([metric, value]) => ({ id: `metric_fixture_${String(metric).replace(/\W/g, "_")}`, subject: `github:${request.repository}`, source: "github", metric: String(metric), geography: null, observedAt, rawValue: Number(value), normalizedValue: Number(value), unit: "count" as const, collectionMethod: "authorized_public_api" as const, provenance }));
+        },
+      } : undefined;
+      const result = await this.collectGithubMetrics({ subject: request.repository, since: request.since, connector });
+      quantitativeObservations.push(...result.observations);
+      const starObservation = result.observations.find((item): item is GitHubMetricObservation => item.source === "github" && item.metric === "stars");
+      if (starObservation) githubStarObservations.push({ repository: request.repository, observation: starObservation });
+      for (const series of result.series) {
+        quantitativeSeries.push(series);
+        claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${series.id}`, lane: "supply_competition", statement: `${request.repository} ${series.metric}: ${series.observationIds.length} observations`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: series.id, observationIds: series.observationIds }], independentSourceGroupIds: [], limitations: ["GitHub popularity is not validated demand"] }));
+      }
+    }
+    const rankingUniverse = githubStarObservations.map((item) => item.repository).sort();
+    for (const [index, item] of [...githubStarObservations].sort((a, b) => b.observation.normalizedValue - a.observation.normalizedValue || a.repository.localeCompare(b.repository)).entries()) {
+      const rank = index + 1;
+      const observation = createGitHubMetricObservation({
+        id: asId(`metric_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`),
+        subject: { kind: "repository", externalId: item.repository.toLowerCase(), url: `https://github.com/${item.repository}` },
+        metric: "trending_rank", geography: null, observedAt: item.observation.observedAt, rawValue: rank, normalizedValue: rank,
+        provenance: { collector: "idea-finder-github-brief-ranking", collectorVersion: "1", interface: "github_rest_api", sourceRef: item.observation.provenance.sourceRef, collectedAt: item.observation.provenance.collectedAt },
+      });
+      const series = buildTrendSeries(asId(`trend_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`), [observation]).series;
+      const rankingStorage = this.openCanonical();
+      try { rankingStorage.transaction(() => { rankingStorage.metricObservations.save(observation); rankingStorage.trendSeries.save(series); }); } finally { rankingStorage.close(); }
+      quantitativeObservations.push(observation); quantitativeSeries.push(series);
+      claims.push(buildResearchClaim({
+        id: `claim_${stored.run.id}_${series.id}_ranking`, lane: "supply_competition",
+        statement: `${item.repository} star rank: ${rank} of ${rankingUniverse.length} in Brief comparison universe [${rankingUniverse.join(", ")}]`,
+        status: "unvalidated", evidenceRefs: [{ kind: "ranking_snapshot", observationId: observation.id, sourceUrl: observation.provenance.sourceRef }],
+        independentSourceGroupIds: [], limitations: ["Brief-relative star ranking is supply evidence, not validated demand"],
+      }));
+    }
+    for (const request of plan.packages ?? []) {
+      const connector: PackageDownloadsConnector | undefined = fixture ? {
+        ecosystem: request.ecosystem, async collect(query) {
+          const start = Date.parse(`${query.from}T00:00:00.000Z`); const end = Date.parse(`${query.to}T00:00:00.000Z`);
+          const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: `fixture://multi-lane/${request.ecosystem}`, retrievedAt: "2026-01-10T00:00:00.000Z", caveat: "Recorded representative fixture" };
+          const days = Array.from({ length: Math.floor((end - start) / 86_400_000) + 1 }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
+          return { ecosystem: request.ecosystem, package: query.package, from: query.from, to: query.to, provenance, buckets: days.map((day) => ({ id: `fixture_${request.ecosystem}_${day}`, ecosystem: request.ecosystem, package: query.package, subject: `${request.ecosystem}:${query.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })) };
+        },
+      } : undefined;
+      const result = await this.collectPackageDownloads({ ecosystem: request.ecosystem, packageName: request.package, from: request.from, to: request.to, connector });
+      quantitativeSeries.push(result.series);
+      quantitativeObservations.push(...result.observations);
+      claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "supply_competition", statement: `${request.ecosystem}:${request.package} download momentum`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Download momentum is not validated demand", ...(request.ecosystem === "pypi" ? ["pypistats is a third-party public API"] : [])] }));
+    }
+
+    const candidateFor = (kind: string, selected: ResearchClaim[], series: TrendSeries[]): MultiLaneCandidate => evaluateMultiLaneCandidate({ id: `candidate_${stored.run.id}_${kind}`, subject: brief.title, claims: selected, qualitativeEvidenceItemIds: [], quantitativeSeriesIds: series.map((item) => item.id), independentQualitativeSourceGroupIds: [] });
+    const trendClaims = claims.filter((claim) => claim.lane === "trend_momentum");
+    const rankingClaims = claims.filter((claim) => claim.evidenceRefs.some((ref) => ref.kind === "ranking_snapshot"));
+    const starClaims = claims.filter((claim) => claim.statement.includes(" stars:"));
+    const downloadClaims = claims.filter((claim) => claim.statement.includes("download momentum"));
+    const candidates = [
+      candidateFor("trend_only", trendClaims, quantitativeSeries.filter((series) => series.source === "google_trends")),
+      candidateFor("ranking_only", rankingClaims, []),
+      candidateFor("star_only", starClaims, quantitativeSeries.filter((series) => series.source === "github" && series.metric === "stars")),
+      candidateFor("download_only", downloadClaims, quantitativeSeries.filter((series) => series.source === "npm_registry" || series.source === "pypi")),
+    ];
+    const summary = buildMultiLaneSummary({ briefId: brief.id, runId: stored.run.id, claims, candidates, followUpProposalIds: followUps.map((item) => item.id) });
+    const report: StoredMultiLaneReportRecord = { id: stored.run.id, runId: stored.run.id, briefId: brief.id, summary, claims, candidateIds: candidates.map((item) => item.id), seriesSnapshots: quantitativeSeries, observationSnapshots: quantitativeObservations };
+    const canonical = this.openCanonical();
+    try {
+      canonical.transaction(() => {
+        for (const proposal of followUps) canonical.followUpProposals.save(stored.run.id, proposal);
+        canonical.multiLaneReports.save(report);
+      });
+    } finally { canonical.close(); }
+    return report;
+  }
+
+  inspectMultiLaneResearch(runId: ResearchRunId, claimId?: string): { report: StoredMultiLaneReportRecord; claims: ResearchClaim[]; details: unknown[]; independence: unknown[]; proposals: FollowUpHuntingTaskProposal[] } {
+    const storage = this.openCanonical();
+    try {
+      const report = storage.multiLaneReports.getByRun(runId);
+      if (!report) throw new Error(`Multi-lane report not found: ${runId}`);
+      const claims = claimId ? report.claims.filter((claim) => claim.id === claimId) : [...report.claims];
+      if (claimId && claims.length === 0) throw new Error(`Research claim not found: ${claimId}`);
+      const details = claims.flatMap((claim) => claim.evidenceRefs.map((ref) => {
+        if (ref.kind === "text_quote") return { claimId: claim.id, ref, evidence: storage.evidenceItems.get(runId, ref.evidenceItemId), chunk: storage.chunks.get(runId, ref.chunkId), document: storage.rawDocuments.get(runId, ref.documentId) };
+        if (ref.kind === "observation_series") return { claimId: claim.id, ref, series: report.seriesSnapshots.find((item) => item.id === ref.seriesId) ?? null, observations: ref.observationIds.map((id) => report.observationSnapshots.find((item) => item.id === id) ?? null) };
+        if (ref.kind === "ranking_snapshot") return { claimId: claim.id, ref, observation: report.observationSnapshots.find((item) => item.id === ref.observationId) ?? null };
+        return { claimId: claim.id, ref };
+      }));
+      return { report, claims, details, independence: storage.evidenceIndependence.listByRun(runId), proposals: storage.followUpProposals.listByRun(runId) };
+    } finally { storage.close(); }
+  }
+
+  async createFollowUpBrief(runId: ResearchRunId, proposalId: string, slug: string): Promise<HuntingBrief> {
+    await this.migrateLegacyBriefs();
+    const storage = this.openCanonical();
+    try {
+      const proposal = storage.followUpProposals.get(runId, proposalId);
+      if (!proposal) throw new Error(`Follow-up proposal not found: ${proposalId}`);
+      if (proposal.status === "created") {
+        const existing = storage.huntingBriefs.get(proposal.createdBriefId! as string) as HuntingBrief | null;
+        if (!existing || existing.slug !== slug) throw new Error(`Follow-up proposal already created as ${proposal.createdBriefId}`);
+        return existing;
+      }
+      const brief: HuntingBrief = {
+        id: asId<HuntingTaskId>(`task_${slug}`), slug, title: `Follow-up: ${proposal.subject}`,
+        description: `Investigate demand behind trend anomaly for ${proposal.subject}`,
+        lenses: [...proposal.suggestedLenses], sourcesEnabled: ["hn", "stack_exchange"],
+        successCriteria: "Independent qualitative pain, workaround, competition, and commercial-intent evidence",
+        createdAt: new Date().toISOString(),
+        queryPlan: { harvestMode: "l0", searches: [
+          { platform: "hn", terms: [proposal.subject, "pain", "workaround", "alternative"] },
+          { platform: "stack_exchange", terms: [proposal.subject, "problem", "tool"] },
+        ] },
+        origin: { kind: "trend_anomaly", parentRunId: runId, trendEventId: proposal.triggerEventId, trendSeriesId: proposal.triggerSeriesId },
+      };
+      const createdProposal: FollowUpHuntingTaskProposal = { ...proposal, status: "created", createdBriefId: brief.id, createdAt: brief.createdAt };
+      storage.transaction(() => {
+        if (storage.huntingBriefs.list().some((item) => item.id === brief.id || item.slug === brief.slug)) throw new Error(`Brief already exists: ${slug}`);
+        storage.huntingBriefs.save(brief);
+        storage.followUpProposals.save(runId, createdProposal);
+      });
+      return brief;
+    } finally { storage.close(); }
   }
 
   listMetricObservations(subjectExternalId?: string, metric?: GitHubMetric): MetricObservation[] {

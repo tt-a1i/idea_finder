@@ -18,6 +18,7 @@ export function createRunScopedRepository<T extends { id: string }>(
      ON CONFLICT(research_run_id, id) DO UPDATE SET
        payload_json = excluded.payload_json`,
   );
+  const deleteStmt = db.prepare(`DELETE FROM ${table} WHERE research_run_id = ? AND id = ?`);
 
   return {
     save(runId: ResearchRunId, entity: T) {
@@ -30,6 +31,9 @@ export function createRunScopedRepository<T extends { id: string }>(
     listByRun(runId: ResearchRunId) {
       const rows = listStmt.all(runId) as { payload_json: string }[];
       return rows.map((row) => JSON.parse(row.payload_json) as T);
+    },
+    delete(runId: ResearchRunId, id: string) {
+      deleteStmt.run(runId, id);
     },
   };
 }

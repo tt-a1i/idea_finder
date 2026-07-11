@@ -48,6 +48,10 @@ storage.close();
 Package observations and series index ecosystem, canonical package name, and
 bucket window explicitly. This keeps same-named npm and PyPI packages separate
 and makes PyPI normalization aliases idempotent.
+
+Multi-lane research snapshots, evidence-independence records, and follow-up
+proposals are canonical run-scoped SQLite records. Report writes validate every
+quote, series, and observation reference before committing.
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

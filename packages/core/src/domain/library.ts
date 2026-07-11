@@ -5,6 +5,7 @@ import type { Chunk, EvidenceItem, RawSignal } from "./types.js";
 import type { ChunkId } from "./ids.js";
 import type { ValidationIssue } from "./validation.js";
 import { validateOpportunityDraft } from "./validation.js";
+import type { CorroborationContext } from "./multi-lane-research.js";
 
 export interface DraftRejection {
   draftId: OpportunityDraftId;
@@ -46,6 +47,7 @@ export function admitToLibrary(
   evidenceById: ReadonlyMap<EvidenceItem["id"], EvidenceItem>,
   chunksById: ReadonlyMap<ChunkId, Chunk>,
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>,
+  corroborationContext?: CorroborationContext,
 ): LibraryAdmissionResult {
   const admitted: Opportunity[] = [];
   const rejected: DraftRejection[] = [];
@@ -56,6 +58,7 @@ export function admitToLibrary(
       evidenceById,
       chunksById,
       signalsById,
+      corroborationContext,
     );
 
     if (!validation.ok) {

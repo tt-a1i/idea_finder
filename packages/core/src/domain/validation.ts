@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 import type { ActorKind } from "./types.js";
 import type { ChunkId } from "./ids.js";
+import type { CorroborationContext } from "./multi-lane-research.js";
 
 export const MIN_EVIDENCE_REF_COUNT = 3;
 export const MIN_DISTINCT_DOCUMENTS_FOR_PROMOTED = 2;
@@ -335,6 +336,7 @@ export function validateOpportunityStatusEvidenceRequirements(
   status: OpportunityStatus,
   evidenceItems: EvidenceItem[],
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>,
+  corroborationContext?: CorroborationContext,
 ): ValidationResult {
   if (!STATUSES_REQUIRING_MIN_EVIDENCE.has(status)) {
     return VALID;
@@ -344,7 +346,22 @@ export function validateOpportunityStatusEvidenceRequirements(
     (item) => item.supportsClaim !== "disconfirming",
   );
 
-  if (nonDisconfirming.length < MIN_EVIDENCE_REF_COUNT) {
+  const independentGroups = new Set<string>();
+  if (corroborationContext) {
+    for (const item of nonDisconfirming) {
+      const group = corroborationContext.independenceGroupByDocumentId.get(item.documentId);
+      if (!group) {
+        return validationFailure(
+          "independence.metadata_missing",
+          `Missing independence metadata for document ${item.documentId}`,
+        );
+      }
+      independentGroups.add(group);
+    }
+  }
+  const corroboratingCount = corroborationContext ? independentGroups.size : nonDisconfirming.length;
+
+  if (corroboratingCount < MIN_EVIDENCE_REF_COUNT) {
     return validationFailure(
       "opportunity.insufficient_evidence",
       `${status} opportunities require at least ${MIN_EVIDENCE_REF_COUNT} non-disconfirming evidence items`,
@@ -352,7 +369,9 @@ export function validateOpportunityStatusEvidenceRequirements(
   }
 
   if (status === "promoted") {
-    const distinctDocuments = countDistinctDocuments(nonDisconfirming);
+    const distinctDocuments = corroborationContext
+      ? independentGroups.size
+      : countDistinctDocuments(nonDisconfirming);
     const strongSingleSource = hasWtpOrWorkaroundSignal(
       nonDisconfirming,
       signalsById,
@@ -377,6 +396,7 @@ export function validateOpportunityDraft(
   evidenceById: ReadonlyMap<EvidenceItem["id"], EvidenceItem>,
   chunksById: ReadonlyMap<ChunkId, Chunk>,
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>,
+  corroborationContext?: CorroborationContext,
 ): ValidationResult {
   const actorResult = validateActorMayWriteOpportunity(draft.provenance.createdBy);
   const refsResult = validateOpportunityHasEvidenceRefs(
@@ -404,7 +424,7 @@ export function validateOpportunityDraft(
       signalsById,
       chunksById,
     ),
-    draft.evidenceItemIds.length < MIN_EVIDENCE_REF_COUNT
+    !corroborationContext && draft.evidenceItemIds.length < MIN_EVIDENCE_REF_COUNT
       ? validationFailure(
           "opportunity.draft_insufficient_evidence",
           `OpportunityDraft requires at least ${MIN_EVIDENCE_REF_COUNT} evidence references`,
@@ -414,6 +434,7 @@ export function validateOpportunityDraft(
       "hypothesis",
       collected.evidence,
       signalsById,
+      corroborationContext,
     ),
   );
 }
@@ -423,6 +444,7 @@ export function validateOpportunity(
   evidenceById: ReadonlyMap<EvidenceItem["id"], EvidenceItem>,
   chunksById: ReadonlyMap<ChunkId, Chunk>,
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>,
+  corroborationContext?: CorroborationContext,
 ): ValidationResult {
   const refsResult = validateOpportunityHasEvidenceRefs(
     opportunity.evidenceItemIds,
@@ -458,6 +480,7 @@ export function validateOpportunity(
       opportunity.status,
       collected.evidence,
       signalsById,
+      corroborationContext,
     ),
     promotionActor,
     isAgentActor(opportunity.provenance.createdBy)

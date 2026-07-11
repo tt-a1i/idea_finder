@@ -16,6 +16,7 @@ import {
   isAgentActor,
   validateOpportunity,
 } from "./validation.js";
+import type { CorroborationContext } from "./multi-lane-research.js";
 
 export interface CalibrationResult {
   opportunity: Opportunity;
@@ -26,6 +27,7 @@ export interface CalibrationValidationContext {
   evidenceById: ReadonlyMap<EvidenceItem["id"], EvidenceItem>;
   chunksById: ReadonlyMap<ChunkId, Chunk>;
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>;
+  corroborationContext?: CorroborationContext;
 }
 
 function statusForAction(action: CalibrationAction): OpportunityStatus {
@@ -60,6 +62,7 @@ function assertPromoteEligible(
     validationContext.evidenceById,
     validationContext.chunksById,
     validationContext.signalsById,
+    validationContext.corroborationContext,
   );
 
   if (!result.ok) {

@@ -268,6 +268,40 @@ describe("installed standalone CLI", () => {
     restartedDb.close();
   });
 
+  it("runs and inspects a representative multi-lane research snapshot, then creates a follow-up Brief", async () => {
+    const multiWorkspace = path.join(consumer, "multi-lane-workspace");
+    const created = await invoke(executable, [
+      "brief", "create", "multi", "--title", "Multi lane", "--manual-import", "This agent coding workaround is painful every day.",
+      "--manual-import", "I would pay $20 monthly for a reliable agent workflow.",
+      "--google-subject", "agent coding", "--google-geo", "US", "--github-repo", "owner/repo",
+      "--npm-package", "agent-tool", "--pypi-package", "agent-tool", "--from", "2026-01-01", "--to", "2026-01-10",
+      "--workspace", multiWorkspace, "--json",
+    ], consumer);
+    expect(created.code).toBe(0);
+    const researched = await invoke(executable, ["research", "run", "multi", "--fixture-set", "representative", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(researched.code).toBe(0);
+    expect(researched.envelope).toMatchObject({ command: "research run", data: { summary: { schemaVersion: "1", lanes: { qualitative_demand: expect.any(Object), trend_momentum: expect.any(Object), supply_competition: expect.any(Object), commercial_intent: expect.any(Object), contradictory_evidence: expect.any(Object) } } } });
+    const candidates = (researched.envelope.data as { summary: { candidates: Array<{ admissionOutcome: string; id: string }> } }).summary.candidates;
+    expect(candidates).toHaveLength(4);
+    expect(candidates.every((item) => item.admissionOutcome === "rejected")).toBe(true);
+    const runId = (researched.envelope.data as { runId: string }).runId;
+    const inspected = await invoke(executable, ["research", "inspect", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(inspected.code).toBe(0);
+    expect(inspected.envelope).toMatchObject({ command: "research inspect", data: { runId, details: expect.any(Array), proposals: [expect.any(Object)] } });
+    const data = inspected.envelope.data as { details: unknown[]; proposals: Array<{ id: string; triggerEventId: string }> };
+    expect(data.details.length).toBeGreaterThan(0);
+    expect(data.details.every((detail: any) => detail.ref.kind === "text_quote" ? detail.evidence && detail.document : detail.ref.kind === "observation_series" ? detail.series && detail.observations.every(Boolean) : detail.observation || detail.ref.url)).toBe(true);
+    const rejected = await invoke(executable, ["library", "rejected", "--run", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(rejected.code).toBe(0);
+    expect((rejected.envelope.data as { results: unknown[] }).results.length).toBeGreaterThan(0);
+    const proposal = data.proposals[0]!;
+    const followed = await invoke(executable, ["research", "follow-up", runId, "--proposal", proposal.id, "--create", "multi-followup", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(followed.code).toBe(0);
+    expect(followed.envelope).toMatchObject({ data: { brief: { slug: "multi-followup", origin: { kind: "trend_anomaly", parentRunId: runId, trendEventId: proposal.triggerEventId } } } });
+    const afterFollowUp = await invoke(executable, ["research", "inspect", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(afterFollowUp.envelope).toMatchObject({ data: { proposals: [expect.objectContaining({ status: "created", createdBriefId: "task_multi-followup" })] } });
+  });
+
   it("separates new scans from named retry/resume and isolates fixtures", async () => {
     const created = await invoke(executable, ["brief", "create", "lifecycle", "--title", "Lifecycle", "--description", "No evidence supplied", "--workspace", workspace, "--json"], consumer);
     expect(created.code).toBe(0);
