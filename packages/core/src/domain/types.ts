@@ -243,6 +243,30 @@ export interface MonitorSchedule {
   readonly lastComparedRunId: ResearchRunId | null;
   readonly enabled: boolean;
   readonly createdAt: string;
+  readonly updatedAt?: string;
+  readonly lastInvokedAt?: string | null;
+  readonly thresholds?: MonitorThresholds;
+}
+
+export interface MonitorThresholds {
+  readonly minCrossSourceGrowth: number;
+  readonly minStrongPainGrowth: number;
+  readonly minCommercialEvidenceGrowth: number;
+  readonly minCoolingEvidenceLoss: number;
+}
+
+export interface MonitorSourceCoverage {
+  readonly requestKey: string;
+  readonly source: string;
+  readonly status: "success" | "failure" | "skipped" | "unauthorized" | "throttled" | "unavailable";
+  readonly reason: string | null;
+  readonly itemCount: number;
+}
+
+export interface MonitorCoverageSnapshot {
+  readonly complete: boolean;
+  readonly sources: readonly MonitorSourceCoverage[];
+  readonly incompleteRequestKeys: readonly string[];
 }
 
 export type MonitorDiffKind = "added" | "heated" | "cooled" | "unchanged";
@@ -254,6 +278,31 @@ export interface MonitorOpportunitySnapshot {
   readonly status: OpportunityStatus;
   readonly confidence: ConfidenceLevel;
   readonly evidenceCount: number;
+  readonly monitorKey: string;
+  readonly monitorKeyVersion: "semantic-v1";
+  readonly evidenceItemIds: readonly EvidenceItemId[];
+  readonly sourceCount: number;
+  readonly strongPainCount: number;
+  readonly commercialEvidenceCount: number;
+  readonly evidenceRefs: readonly MonitorEvidenceRef[];
+}
+
+export interface MonitorEvidenceRef {
+  readonly evidenceItemId: EvidenceItemId;
+  readonly platform: string;
+  readonly url: string;
+  readonly supportsClaim: SupportsClaim;
+  readonly strength: EvidenceStrength;
+}
+
+export interface MonitorEvidenceChange {
+  readonly addedEvidenceItemIds: readonly EvidenceItemId[];
+  readonly removedEvidenceItemIds: readonly EvidenceItemId[];
+  readonly sourceCountDelta: number;
+  readonly strongPainDelta: number;
+  readonly commercialEvidenceDelta: number;
+  readonly addedEvidence: readonly MonitorEvidenceRef[];
+  readonly removedEvidence: readonly MonitorEvidenceRef[];
 }
 
 export interface MonitorDiffEntry {
@@ -264,6 +313,12 @@ export interface MonitorDiffEntry {
   readonly before: MonitorOpportunitySnapshot | null;
   readonly after: MonitorOpportunitySnapshot | null;
   readonly evidenceCountDelta: number;
+  readonly evidenceChange: MonitorEvidenceChange;
+  readonly causes: readonly string[];
+  readonly conclusive: boolean;
+  readonly coolingSuppressed: boolean;
+  readonly notify: boolean;
+  readonly notificationReasons: readonly string[];
 }
 
 export interface MonitorDiffSummary {
@@ -279,6 +334,9 @@ export interface MonitorDiff {
   readonly computedAt: string;
   readonly entries: readonly MonitorDiffEntry[];
   readonly summary: MonitorDiffSummary;
+  readonly coverage: { readonly baseline: MonitorCoverageSnapshot; readonly compare: MonitorCoverageSnapshot; readonly partial: boolean };
+  readonly notifications: { readonly triggered: boolean; readonly reasons: readonly string[]; readonly monitorKeys: readonly string[] };
+  readonly thresholds: MonitorThresholds;
 }
 
 /** Quantitative evidence is deliberately separate from qualitative RawSignal/EvidenceItem. */

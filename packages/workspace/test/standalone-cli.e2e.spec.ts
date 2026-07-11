@@ -124,8 +124,21 @@ describe("installed standalone CLI", () => {
     expectSuccess(await invoke(executable, ["validation", "list", "--opportunity", opportunityId, "--workspace", workspace, "--json"], consumer), "validation list");
     expectSuccess(await invoke(executable, ["validation", "complete", experimentId, "--outcome", "inconclusive", "--summary", "More interviews needed", "--workspace", workspace, "--json"], consumer), "validation complete");
 
-    expectSuccess(await invoke(executable, ["monitor", "schedule", "agents", "--cadence", "weekly", "--workspace", workspace, "--json"], consumer), "monitor schedule");
-    expectSuccess(await invoke(executable, ["monitor", "diff", "--brief", "agents", "--baseline", runId, "--compare", runId, "--workspace", workspace, "--json"], consumer), "monitor diff");
+    const monitorSchedule = await invoke(executable, ["monitor", "schedule", "agents", "--cadence", "weekly", "--min-cooling-loss", "2", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorSchedule, "monitor schedule");
+    expect(monitorSchedule.envelope).toMatchObject({ data: { schedule: { cadence: "weekly", thresholds: { minCoolingEvidenceLoss: 2 } } } });
+    const monitorBaseline = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorBaseline, "monitor run");
+    expect(monitorBaseline.envelope).toMatchObject({ data: { baselineRunId: null, comparison: null, run: { run: { id: expect.any(String) } } } });
+    const monitorCompare = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--fixture-source-outcome", "pain-growth", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorCompare, "monitor run");
+    const baselineMonitorRunId = (monitorBaseline.envelope.data as { run: { run: { id: string } } }).run.run.id;
+    const compareMonitorRunId = (monitorCompare.envelope.data as { run: { run: { id: string } } }).run.run.id;
+    expect(compareMonitorRunId).not.toBe(baselineMonitorRunId);
+    expect(monitorCompare.envelope).toMatchObject({ data: { baselineRunId: baselineMonitorRunId, comparison: { diff: { baselineRunId: baselineMonitorRunId, compareRunId: compareMonitorRunId, entries: expect.arrayContaining([expect.objectContaining({ evidenceChange: expect.objectContaining({ strongPainDelta: 1 }), causes: expect.any(Array), notificationReasons: expect.arrayContaining(["strong_pain_growth"]) })]), notifications: { triggered: true, reasons: expect.arrayContaining(["strong_pain_growth"]) } } } } });
+    const monitorPartial = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--fixture-source-outcome", "partial-zero", "--workspace", workspace, "--json"], consumer);
+    expect(monitorPartial.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(monitorPartial.envelope).toMatchObject({ status: "partial", data: { comparison: { diff: { coverage: { partial: true }, summary: { cooled: 0 }, entries: [expect.objectContaining({ coolingSuppressed: true, conclusive: false })] } } } });
     expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--workspace", workspace, "--json"], consumer), "trends collect");
     expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--fixture-time", "2026-07-12T00:00:00.000Z", "--fixture-stars", "180", "--workspace", workspace, "--json"], consumer), "trends collect");
     const installedObservations = await invoke(executable, ["trends", "observations", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
@@ -325,6 +338,10 @@ describe("installed standalone CLI", () => {
     const recoveredInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
     expect(recoveredInspect.code).toBe(0);
     expect((recoveredInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id)).toEqual(expect.arrayContaining(retainedClaimIds));
+    expect((await invoke(executable, ["monitor", "schedule", "multi", "--cadence", "daily", "--workspace", multiWorkspace, "--json"], consumer)).code).toBe(0);
+    const quantitativeMonitor = await invoke(executable, ["monitor", "run", "multi", "--fixture", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(quantitativeMonitor.code, JSON.stringify(quantitativeMonitor.envelope)).toBe(0);
+    expect(quantitativeMonitor.envelope).toMatchObject({ data: { comparison: null, sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "success" }), expect.objectContaining({ source: "github", status: "success" }), expect.objectContaining({ source: "npm", status: "success" })]) } });
   });
 
   it("separates new scans from named retry/resume and isolates fixtures", async () => {

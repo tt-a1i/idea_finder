@@ -60,6 +60,7 @@ Usage:
   idea-finder validation complete <experimentId> --outcome <validated|invalidated|inconclusive|blocked> --summary <text>
   idea-finder monitor diff --brief <slug> --baseline <runId> --compare <runId>
   idea-finder monitor schedule <brief> --cadence <manual|daily|weekly> [--enabled <true|false>]
+  idea-finder monitor run <brief> [--fixture] [--fixture-set <representative|google-throttled|github-unauthorized|npm-unavailable>]
   idea-finder trends collect github <owner/repository> [--since <iso-time>] [--fixture]
   idea-finder trends collect google <subject> --geo <CC|WORLDWIDE> --from <iso> --to <iso> [--granularity <day|week>] [--fixture] [--fixture-pattern <spike|seasonal|sustained|insufficient>]
   idea-finder trends collect <npm|pypi> <package> --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--fixture]
@@ -159,7 +160,8 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "validation list": { valueFlags: ["--opportunity"], positionalCount: 2 },
   "validation complete": { valueFlags: ["--outcome", "--summary"], positionalCount: 3 },
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
-  "monitor schedule": { valueFlags: ["--cadence", "--enabled"], positionalCount: 3 },
+  "monitor schedule": { valueFlags: ["--cadence", "--enabled", "--min-cross-source-growth", "--min-strong-pain-growth", "--min-commercial-growth", "--min-cooling-loss"], positionalCount: 3 },
+  "monitor run": { valueFlags: ["--fixture-source-outcome", "--fixture-set"], booleanFlags: ["--fixture"], positionalCount: 3 },
   "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars", "--geo", "--from", "--to", "--granularity", "--fixture-pattern", "--fixture-failure"], booleanFlags: ["--fixture"], positionalCount: 4 },
   "trends inspect": { valueFlags: ["--geo", "--from", "--to", "--ecosystem", "--package"], positionalCount: 4 },
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
@@ -266,7 +268,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       throw new CliFailure("validation", "run.execution_conflict", "Use only one of --retry or --resume", CLI_EXIT_CODES.validation);
     }
     const fixtureSourceRaw = flag(rest, "--fixture-source-outcome");
-    const fixtureSourceScenario = fixtureSourceRaw ? oneOf(fixtureSourceRaw, ["success", "mixed", "unauthorized", "throttled", "zero"] as const, "fixture-source-outcome") : undefined;
+    const fixtureSourceScenario = fixtureSourceRaw ? oneOf(fixtureSourceRaw, ["success", "mixed", "unauthorized", "throttled", "zero", "partial-zero", "pain-growth"] as const, "fixture-source-outcome") : undefined;
     if (fixtureSourceScenario && !fixture) throw new CliFailure("validation", "run.fixture_source_requires_fixture", "--fixture-source-outcome requires --fixture", CLI_EXIT_CODES.validation);
     const execution = retryRunId ? "retried" : resumeRunId ? "resumed" : "new";
     const stored = await svc(workspaceDir, fixture ? "fixture" : "orchestration", fixtureSourceScenario).runResearch(brief, {
@@ -369,8 +371,32 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const cadence = oneOf(required(flag(rest, "--cadence"), "monitor.cadence_required", "--cadence is required"), CADENCES, "cadence");
     const enabledRaw = flag(rest, "--enabled");
     if (enabledRaw !== undefined && !["true", "false", "1", "0"].includes(enabledRaw)) throw new CliFailure("validation", "monitor.enabled_invalid", "--enabled must be true or false", CLI_EXIT_CODES.validation);
-    const schedule = await svc(workspaceDir).setMonitorSchedule({ briefSlugOrId, cadence, enabled: enabledRaw === undefined ? undefined : enabledRaw === "true" || enabledRaw === "1" });
+    const threshold = (name: string): number | undefined => { const raw = flag(rest, name); if (raw === undefined) return undefined; const value = Number(raw); if (!Number.isInteger(value) || value <= 0) throw new CliFailure("validation", "monitor.threshold_invalid", `${name} must be a positive integer`, CLI_EXIT_CODES.validation); return value; };
+    const thresholds = {
+      minCrossSourceGrowth: threshold("--min-cross-source-growth"), minStrongPainGrowth: threshold("--min-strong-pain-growth"),
+      minCommercialEvidenceGrowth: threshold("--min-commercial-growth"), minCoolingEvidenceLoss: threshold("--min-cooling-loss"),
+    };
+    const schedule = await svc(workspaceDir).setMonitorSchedule({ briefSlugOrId, cadence, enabled: enabledRaw === undefined ? undefined : enabledRaw === "true" || enabledRaw === "1", thresholds: Object.fromEntries(Object.entries(thresholds).filter(([, value]) => value !== undefined)) });
     return { command: "monitor schedule", data: { schedule }, human: `Monitor schedule ${schedule.id}: cadence=${schedule.cadence} enabled=${schedule.enabled}` };
+  }
+
+  if (cmd === "monitor" && sub === "run") {
+    const briefSlugOrId = required(rest[0], "monitor.brief_required", "monitor run requires <brief>");
+    const fixture = has(rest, "--fixture");
+    const fixtureSourceRaw = flag(rest, "--fixture-source-outcome");
+    const fixtureSourceScenario = fixtureSourceRaw ? oneOf(fixtureSourceRaw, ["success", "mixed", "unauthorized", "throttled", "zero", "partial-zero", "pain-growth"] as const, "fixture-source-outcome") : undefined;
+    if (fixtureSourceScenario && !fixture) throw new CliFailure("validation", "monitor.fixture_source_requires_fixture", "--fixture-source-outcome requires --fixture", CLI_EXIT_CODES.validation);
+    const fixtureSetRaw = flag(rest, "--fixture-set");
+    const fixtureSet = fixtureSetRaw ? oneOf(fixtureSetRaw, ["representative", "google-throttled", "github-unauthorized", "npm-unavailable"] as const, "fixture-set") : undefined;
+    const orchestrationService = svc(workspaceDir);
+    const monitorBrief = await orchestrationService.getBrief(briefSlugOrId);
+    if (!monitorBrief) throw new Error(`Brief not found: ${briefSlugOrId}`);
+    const quantitative = Boolean(monitorBrief.queryPlan?.quantitative);
+    const monitorService = fixture && !quantitative ? svc(workspaceDir, "fixture", fixtureSourceScenario) : orchestrationService;
+    const result = await monitorService.invokeMonitor({ briefSlugOrId, fixtureSet: fixtureSet ?? (fixture && quantitative ? "representative" : undefined) });
+    const incomplete = result.sourceStatuses.filter((status) => status.status !== "success");
+    const reasons = incomplete.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`);
+    return { command: "monitor run", data: result, human: `Monitor run ${result.run.run.id}: ${result.comparison ? `${result.comparison.diff.summary.added} added, ${result.comparison.diff.summary.heated} heated, ${result.comparison.diff.summary.cooled} cooled, ${result.comparison.diff.summary.unchanged} unchanged` : "baseline established"}${incomplete.length ? "; partial coverage; cooling is suppressed where inconclusive" : ""}`, incompleteness: reasons.length ? reasons : undefined, exitCode: reasons.length ? CLI_EXIT_CODES.partialResult : undefined };
   }
 
   if (cmd === "trends" && sub === "collect") {

@@ -13,7 +13,7 @@ import type {
 } from "./research-runner.js";
 
 /** Fixture-backed runner — no live connectors or LLM. */
-export type FixtureSourceScenario = "success" | "mixed" | "unauthorized" | "throttled" | "zero";
+export type FixtureSourceScenario = "success" | "mixed" | "unauthorized" | "throttled" | "zero" | "partial-zero" | "pain-growth";
 
 export function createFixtureResearchRunner(sourceScenario: FixtureSourceScenario = "success"): ResearchRunner {
   return {
@@ -26,8 +26,11 @@ export function createFixtureResearchRunner(sourceScenario: FixtureSourceScenari
       const rejectedByDraft = new Map(admission.rejected.map((item) => [item.draftId, item]));
       const effectiveConfig = effectiveResearchConfig(brief);
       const recovering = request.execution !== "new";
-      const empty = sourceScenario === "zero";
-      const incompleteStatus = sourceScenario === "success" || sourceScenario === "zero" ? null : sourceScenario;
+      const empty = sourceScenario === "zero" || sourceScenario === "partial-zero";
+      const incompleteStatus = sourceScenario === "success" || sourceScenario === "zero" || sourceScenario === "pain-growth" ? null : sourceScenario === "partial-zero" ? "mixed" : sourceScenario;
+      const extraPain = sourceScenario === "pain-growth" ? { ...invoicingFixture.evidence[0]!, id: asId("e_fixture_pain_growth"), supportsClaim: "pain" as const, strength: "supporting" as const, quoteVerbatim: "Repeated painful reconciliation blocks this workflow every day." } : null;
+      const fixtureEvidence = extraPain ? [...invoicingFixture.evidence, extraPain] : [...invoicingFixture.evidence];
+      const fixtureOpportunities = extraPain ? admission.admitted.map((item, index) => index === 0 ? { ...item, evidenceItemIds: [...item.evidenceItemIds, extraPain.id] } : item) : admission.admitted;
       const retainedStatus = { id: "fixture:retained", requestKey: "fixture:retained", source: "fixture_retained", status: "success" as const, itemCount: empty ? 0 : invoicingFixture.chunks.length, reasonCode: empty ? "zero_results" as const : "none" as const, reason: null, startedAt: now, completedAt: now, retryAt: null };
       const sourceStatuses = incompleteStatus ? [retainedStatus, {
         id: "fixture:recoverable", requestKey: "fixture:recoverable", source: "fixture_recoverable",
@@ -50,9 +53,9 @@ export function createFixtureResearchRunner(sourceScenario: FixtureSourceScenari
         documents: [],
         chunks: empty || recovering ? [] : [...invoicingFixture.chunks],
         signals: empty || recovering ? [] : [...invoicingFixture.signals],
-        evidence: empty || recovering ? [] : [...invoicingFixture.evidence],
+        evidence: empty || recovering ? [] : fixtureEvidence,
         drafts: empty || recovering ? [] : [...invoicingFixture.drafts],
-        opportunities: empty || recovering ? [] : admission.admitted,
+        opportunities: empty || recovering ? [] : fixtureOpportunities,
         admissionResults: (empty || recovering ? [] : invoicingFixture.drafts).map((draft) => ({
           id: draft.id,
           decision: admission.admitted.some((item) => item.id === `opp_${draft.id}`) ? "admitted" : "rejected",

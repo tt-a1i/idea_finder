@@ -20,6 +20,7 @@ import {
   createGitHubMetricObservation,
   createGoogleTrendsObservation,
   detectLatestTrendEvent,
+  DEFAULT_MONITOR_THRESHOLDS,
   startValidationExperiment as markValidationExperimentRunning,
 } from "@idea-finder/core";
 import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, createNpmDownloadsConnector, createPyPiDownloadsConnector, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
@@ -35,6 +36,8 @@ import type {
   HuntingTaskId,
   MonitorCadence,
   MonitorDiff,
+  MonitorCoverageSnapshot,
+  MonitorThresholds,
   MonitorSchedule,
   GitHubMetric,
   GitHubMetricObservation,
@@ -109,6 +112,23 @@ function failedQuantitativeSourceStatus(id: string, source: string, error: unkno
   const status: ResearchSourceStatus["status"] = /authoriz|credential|401|token required/.test(lower) ? "unauthorized" : /thrott|rate.?limit|429|retry-after/.test(lower) ? "throttled" : /unavailable|timeout|network|fetch failed|http 5\d\d/.test(lower) ? "unavailable" : "failure";
   const retryAt = typeof error === "object" && error !== null ? ((error as { retryAt?: unknown; resetAt?: unknown }).retryAt ?? (error as { resetAt?: unknown }).resetAt) : null;
   return quantitativeSourceStatus({ id, source, status, reason, startedAt, retryAt: typeof retryAt === "string" ? retryAt : null });
+}
+
+function monitorCoverage(statuses: readonly ResearchSourceStatus[], expected: readonly ResearchSourceStatus[] = statuses): MonitorCoverageSnapshot {
+  const byKey = new Map(statuses.map((status) => [status.requestKey ?? status.id, status]));
+  const expectedByKey = new Map(expected.map((status) => [status.requestKey ?? status.id, status]));
+  const sources = [...expectedByKey].map(([requestKey, expectedStatus]) => {
+    const status = byKey.get(requestKey);
+    return status
+      ? { requestKey, source: status.source, status: status.status, reason: status.reason, itemCount: status.itemCount }
+      : { requestKey, source: expectedStatus.source, status: "skipped" as const, reason: "Missing source execution status", itemCount: 0 };
+  });
+  const incompleteRequestKeys = sources.filter((status) => status.status !== "success").map((status) => status.requestKey).sort();
+  return { complete: incompleteRequestKeys.length === 0, sources, incompleteRequestKeys };
+}
+
+function mergeMapsByRequestKey(...groups: Array<readonly ResearchSourceStatus[]>): ResearchSourceStatus[] {
+  return [...new Map(groups.flat().map((status) => [status.requestKey ?? status.id, status])).values()];
 }
 
 interface RunSourceCheckpoint { readonly runId: ResearchRunId; readonly id: string; readonly source: string; readonly startedAt: string }
@@ -1558,26 +1578,21 @@ export class WorkspaceService {
       throw new Error(`Compare run not found for brief: ${input.compareRunId}`);
     }
 
+    const expectedSourceStatuses = mergeMapsByRequestKey(baselineRun.sourceStatuses ?? [], compareRun.sourceStatuses ?? []);
     const diff = buildMonitorDiff({
       baselineRunId: input.baselineRunId,
       compareRunId: input.compareRunId,
       baselineOpportunities: this.opportunitiesForRun(state, input.baselineRunId),
       compareOpportunities: this.opportunitiesForRun(state, input.compareRunId),
+      baselineEvidence: new Map(baselineRun.evidence.map((item) => [item.id, item])),
+      compareEvidence: new Map(compareRun.evidence.map((item) => [item.id, item])),
+      baselineCoverage: monitorCoverage(baselineRun.sourceStatuses ?? [], expectedSourceStatuses),
+      compareCoverage: monitorCoverage(compareRun.sourceStatuses ?? [], expectedSourceStatuses),
+      thresholds: (await this.getMonitorSchedule(input.briefSlugOrId))?.thresholds ?? DEFAULT_MONITOR_THRESHOLDS,
     });
 
-    const scheduleId = asId(`mon_${brief.id}`);
     const storage = this.openCanonical();
     try {
-      const existing = storage.monitorSchedules.get(scheduleId) as MonitorSchedule | null;
-      const schedule: MonitorSchedule = existing ?? {
-        id: scheduleId,
-        briefId: brief.id,
-        cadence: "manual",
-        lastComparedRunId: input.compareRunId,
-        enabled: true,
-        createdAt: new Date().toISOString(),
-      };
-      const nextSchedule = { ...schedule, lastComparedRunId: input.compareRunId };
       const comparison = {
         id: `moncmp_${randomUUID()}`,
         briefId: brief.id,
@@ -1586,15 +1601,56 @@ export class WorkspaceService {
         diff,
         createdAt: new Date().toISOString(),
       };
-      storage.transaction(() => {
-        storage.monitorSchedules.save(nextSchedule);
-        storage.monitorComparisons.save(comparison);
-      });
+      storage.monitorComparisons.save(comparison);
     } finally {
       storage.close();
     }
 
     return diff;
+  }
+
+  async invokeMonitor(input: {
+    briefSlugOrId: string;
+    fixtureSet?: "representative" | "google-throttled" | "github-unauthorized" | "npm-unavailable";
+  }): Promise<{ schedule: MonitorSchedule; run: StoredResearchRun; baselineRunId: ResearchRunId | null; comparison: { id: string; diff: MonitorDiff } | null; sourceStatuses: readonly ResearchSourceStatus[] }> {
+    const brief = await this.getBrief(input.briefSlugOrId);
+    if (!brief) throw new Error(`Brief not found: ${input.briefSlugOrId}`);
+    const schedule = await this.getMonitorSchedule(brief.id);
+    if (!schedule) throw new Error(`Monitor schedule not found for brief: ${input.briefSlugOrId}`);
+    if (!schedule.enabled) throw new Error(`Monitor schedule disabled for brief: ${input.briefSlugOrId}`);
+    const baselineRunId = schedule.lastComparedRunId;
+    const hasQuantitativePlan = Boolean(brief.queryPlan?.quantitative);
+    const freshRunId = hasQuantitativePlan
+      ? (await this.runMultiLaneResearch(brief.id, { fixtureSet: input.fixtureSet, execution: "new" })).runId
+      : (await this.runResearch(brief.id, { execution: "new" })).run.id;
+    if (freshRunId === baselineRunId) throw new Error("Monitor invocation must create a distinct ResearchRun");
+    const state = await this.getState();
+    const freshRun = state.runs.find((item) => item.run.id === freshRunId)!;
+    const baselineRun = baselineRunId ? state.runs.find((item) => item.run.id === baselineRunId) : null;
+    if (baselineRunId && (!baselineRun || baselineRun.briefId !== brief.id)) throw new Error(`Monitor baseline run not found for brief: ${baselineRunId}`);
+    const expectedSourceStatuses = baselineRun ? mergeMapsByRequestKey(baselineRun.sourceStatuses ?? [], freshRun.sourceStatuses ?? []) : [];
+    const diff = baselineRun ? buildMonitorDiff({
+      baselineRunId: baselineRun.run.id, compareRunId: freshRun.run.id,
+      baselineOpportunities: baselineRun.opportunities, compareOpportunities: freshRun.opportunities,
+      baselineEvidence: new Map(baselineRun.evidence.map((item) => [item.id, item])),
+      compareEvidence: new Map(freshRun.evidence.map((item) => [item.id, item])),
+      baselineCoverage: monitorCoverage(baselineRun.sourceStatuses ?? [], expectedSourceStatuses), compareCoverage: monitorCoverage(freshRun.sourceStatuses ?? [], expectedSourceStatuses),
+      thresholds: schedule.thresholds ?? DEFAULT_MONITOR_THRESHOLDS,
+    }) : null;
+    const comparison = diff ? { id: `moncmp_${randomUUID()}`, diff } : null;
+    const invokedAt = new Date().toISOString();
+    const storage = this.openCanonical();
+    let nextSchedule: MonitorSchedule;
+    try {
+      storage.transaction(() => {
+        const current = storage.monitorSchedules.get(schedule.id) as MonitorSchedule | null;
+        if (!current || current.lastComparedRunId !== baselineRunId) throw new Error(`Monitor schedule cursor conflict for ${schedule.id}`);
+        nextSchedule = { ...current, lastComparedRunId: freshRun.run.id, lastInvokedAt: invokedAt, updatedAt: invokedAt, thresholds: current.thresholds ?? DEFAULT_MONITOR_THRESHOLDS };
+        if (comparison) storage.monitorComparisons.save({ id: comparison.id, briefId: brief.id, baselineRunId: baselineRunId!, compareRunId: freshRun.run.id, diff, createdAt: invokedAt });
+        storage.monitorSchedules.save(nextSchedule);
+      });
+    } finally { storage.close(); }
+    return { schedule: nextSchedule!, run: freshRun, baselineRunId, comparison, sourceStatuses: freshRun.sourceStatuses ?? [] };
   }
 
   async getMonitorSchedule(briefSlugOrId: string): Promise<MonitorSchedule | null> {
@@ -1613,12 +1669,14 @@ export class WorkspaceService {
     briefSlugOrId: string;
     cadence: MonitorCadence;
     enabled?: boolean;
+    thresholds?: Partial<MonitorThresholds>;
   }): Promise<MonitorSchedule> {
     await this.migrateLegacyDecisionState();
     const brief = await this.getBrief(input.briefSlugOrId);
     if (!brief) {
       throw new Error(`Brief not found: ${input.briefSlugOrId}`);
     }
+    if (input.thresholds && Object.values(input.thresholds).some((value) => value !== undefined && (!Number.isInteger(value) || value <= 0))) throw new Error("Monitor thresholds must be positive integers");
 
     const scheduleId = asId(`mon_${brief.id}`);
     const storage = this.openCanonical();
@@ -1631,6 +1689,9 @@ export class WorkspaceService {
         lastComparedRunId: existing?.lastComparedRunId ?? null,
         enabled: input.enabled ?? existing?.enabled ?? true,
         createdAt: existing?.createdAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastInvokedAt: existing?.lastInvokedAt ?? null,
+        thresholds: { ...DEFAULT_MONITOR_THRESHOLDS, ...(existing?.thresholds ?? {}), ...(input.thresholds ?? {}) },
       };
       storage.monitorSchedules.save(schedule);
       return schedule;

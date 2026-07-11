@@ -36,6 +36,10 @@ npm run cli -- run invoicing
 npm run cli -- run invoicing --retry run_123
 npm run cli -- run invoicing --resume run_123
 
+# Store cadence/notification thresholds, then invoke from cron or Codex Automation
+npm run cli -- monitor schedule invoicing --cadence daily --min-cross-source-growth 1 --min-strong-pain-growth 1 --min-commercial-growth 1 --min-cooling-loss 2
+npm run cli -- monitor run invoicing --json
+
 # Demonstration fixture data is opt-in only
 npm run cli -- run invoicing --fixture
 
@@ -193,6 +197,16 @@ still persists a partial report containing every completed lane; both `run` and
 `inspect` return exit 6 and name incomplete lanes. Retrying the same run skips
 successful requests, collects missing lanes, and updates the report without
 duplicating persisted snapshots.
+
+Monitoring does not run an internal scheduler. `monitor schedule` stores
+`manual`, `daily`, or `weekly` policy and evidence thresholds in canonical
+SQLite; an external scheduler calls `monitor run <brief>`. Each invocation
+creates a fresh ResearchRun, atomically advances the schedule cursor, and (after
+the first baseline) persists an added/heated/cooled/unchanged diff. Entries use
+a versioned cross-run semantic key and include added/removed evidence IDs,
+platforms, source URLs, and pain/commercial/cross-source deltas. Incomplete
+compare coverage is explicit and suppresses otherwise apparent cooling, so a
+throttled or unavailable source cannot masquerade as demand loss.
 
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an
