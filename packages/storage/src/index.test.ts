@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
-import { asId, buildGoogleTrendSeries, classifySearchMomentum, createGoogleTrendsObservation } from "@idea-finder/core";
+import { asId, buildGoogleTrendSeries, buildPackageDownloadSeries, classifySearchMomentum, createGoogleTrendsObservation, createPackageDownloadObservation, detectLatestPackageDownloadEvent } from "@idea-finder/core";
 import type { GoogleTrendsNormalizationContext, MetricObservation, ResearchRun, TrendEvent, TrendSeries } from "@idea-finder/core";
 
 import { openLocalStorage } from "./index.js";
@@ -433,6 +433,60 @@ describe("@idea-finder/storage local persistence", () => {
       expect(restarted.normalizationContexts.list()).toEqual([gb, us]);
       expect(restarted.trendSeries.list({ source: "google_trends", normalizationContextId: us.id })).toEqual([built.series]);
       expect(restarted.trendEvents.listBySeries(built.series.id)).toEqual([event]);
+      restarted.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists package adoption by ecosystem and canonical package window", () => {
+    const dataDir = tempDataDir();
+    const make = (ecosystem: "npm" | "pypi", name: string, index: number, downloads: number) => createPackageDownloadObservation({
+      id: asId(`pobs_${ecosystem}_${index}`), ecosystem, packageName: name, downloads,
+      bucket: {
+        startAt: new Date(Date.UTC(2026, 0, 1 + index * 7)).toISOString(),
+        endAt: new Date(Date.UTC(2026, 0, 8 + index * 7)).toISOString(),
+        resolution: "week", timezone: "UTC", coverageDays: 7, partial: false,
+      },
+      provenance: { collector: "fixture", collectorVersion: "1", interface: "recorded_fixture", sourceRef: "fixture://packages", collectedAt: "2026-07-11T00:00:00.000Z", caveat: "Recorded fixture" },
+    });
+    try {
+      const storage = openLocalStorage({ dataDir });
+      const pypiFirst = make("pypi", "Foo_Bar", 0, 70);
+      const pypiAlias = make("pypi", "foo.bar", 0, 70);
+      const pypiCanonical = make("pypi", "foo-bar", 0, 70);
+      const pypiSecond = make("pypi", "foo-bar", 1, 140);
+      const npmSameName = make("npm", "foo-bar", 0, 700);
+      storage.metricObservations.save(pypiFirst);
+      expect(() => storage.metricObservations.save({ ...pypiFirst, provenance: { ...pypiFirst.provenance, collectedAt: "2026-07-12T00:00:00.000Z" } })).not.toThrow();
+      storage.metricObservations.save(pypiAlias);
+      storage.metricObservations.save(pypiSecond);
+      storage.metricObservations.save(npmSameName);
+      expect(storage.metricObservations.list({ ecosystem: "pypi", packageName: "foo-bar" })).toHaveLength(2);
+      expect(storage.metricObservations.list({ ecosystem: "npm", packageName: "foo-bar" })).toEqual([npmSameName]);
+      const built = buildPackageDownloadSeries(asId("pseries_pypi_foo_bar"), [pypiSecond, pypiCanonical]);
+      storage.trendSeries.save(built.series);
+      const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), {
+        detectedAt: "2026-07-11T00:00:00.000Z", stableRelativeThreshold: 0.05,
+      })!;
+      storage.trendEvents.append(event);
+      expect(() => storage.metricObservations.save({ ...pypiSecond, id: asId("pobs_forged"), normalizedValue: 999 })).toThrow("canonical package values");
+      expect(() => storage.trendSeries.save({ ...built.series, id: asId("pseries_reversed"), observationIds: [...built.series.observationIds].reverse() })).toThrow();
+      expect(() => storage.trendEvents.append({ ...event, id: asId("pevent_forged"), currentValue: 999 })).toThrow("conflicts");
+      expect(() => storage.transaction(() => {
+        storage.metricObservations.save(make("npm", "rollback", 2, 7));
+        throw new Error("package rollback");
+      })).toThrow("package rollback");
+      expect(storage.metricObservations.list({ ecosystem: "npm", packageName: "rollback" })).toEqual([]);
+      storage.quantitativeSourceStatuses.save({
+        id: "pypi:foo-bar", source: "pypi", subjectExternalId: "pypi:foo-bar", status: "partial",
+        itemCount: 2, reason: "one bucket partial", checkedAt: "2026-07-11T00:00:00.000Z", ecosystem: "pypi", packageName: "foo-bar",
+      });
+      storage.close();
+      const restarted = openLocalStorage({ dataDir });
+      expect(restarted.trendSeries.list({ ecosystem: "pypi", packageName: "foo-bar", windowStartAt: built.series.startedAt, windowEndAt: built.series.endedAt })).toEqual([built.series]);
+      expect(restarted.trendEvents.listBySeries(built.series.id)).toEqual([event]);
+      expect(restarted.quantitativeSourceStatuses.get("pypi:foo-bar")).toMatchObject({ status: "partial", ecosystem: "pypi", packageName: "foo-bar" });
       restarted.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });

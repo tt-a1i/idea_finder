@@ -7,12 +7,16 @@ import {
   buildTrendSeries,
   buildGoogleTrendSeries,
   classifySearchMomentum,
+  buildPackageDownloadSeries,
+  canonicalizePackageName,
+  createPackageDownloadObservation,
+  detectLatestPackageDownloadEvent,
   createGitHubMetricObservation,
   createGoogleTrendsObservation,
   detectLatestTrendEvent,
   startValidationExperiment as markValidationExperimentRunning,
 } from "@idea-finder/core";
-import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, GoogleTrendsSourceError, type GoogleTrendsTransport, type QuantitativeConnector } from "@idea-finder/connectors";
+import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, createNpmDownloadsConnector, createPyPiDownloadsConnector, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { openLocalStorage, type LocalStorage } from "@idea-finder/storage";
@@ -32,6 +36,9 @@ import type {
   GoogleTrendsNormalizationContext,
   GoogleTrendsSeries,
   MetricObservation,
+  PackageDownloadObservation,
+  PackageDownloadSeries,
+  PackageEcosystem,
   Opportunity,
   RawSignal,
   ResearchRunId,
@@ -1044,6 +1051,108 @@ export class WorkspaceService {
         storage.close();
       }
       throw error;
+    }
+  }
+
+  async collectPackageDownloads(input: {
+    ecosystem: PackageEcosystem;
+    packageName: string;
+    from: string;
+    to: string;
+    connector?: PackageDownloadsConnector;
+  }): Promise<{ observations: PackageDownloadObservation[]; series: PackageDownloadSeries; event: TrendEvent | null }> {
+    const canonicalName = canonicalizePackageName(input.ecosystem, input.packageName);
+    const connector = input.connector ?? (input.ecosystem === "npm" ? createNpmDownloadsConnector() : createPyPiDownloadsConnector());
+    const statusId = `package:${createHash("sha256").update(`${input.ecosystem}|${canonicalName}|${input.from}|${input.to}`).digest("hex").slice(0, 24)}`;
+    try {
+      const collected = await connector.collect({ package: input.packageName, from: input.from, to: input.to });
+      const observations = collected.buckets.map((item) => {
+        const startAt = new Date(`${item.day}T00:00:00.000Z`);
+        const endAt = new Date(startAt.getTime() + 86_400_000);
+        return createPackageDownloadObservation({
+          id: asId(`metric_${createHash("sha256").update(`${item.ecosystem}|${collected.package}|${startAt.toISOString()}|${endAt.toISOString()}|bucket_count_to_daily_rate_v1`).digest("hex").slice(0, 24)}`),
+          ecosystem: item.ecosystem,
+          packageName: collected.package,
+          bucket: { startAt: startAt.toISOString(), endAt: endAt.toISOString(), resolution: "day", timezone: "UTC", coverageDays: 1, partial: false },
+          downloads: item.downloads,
+          provenance: {
+            collector: item.provenance.provider,
+            collectorVersion: "1",
+            interface: item.provenance.interface === "recorded_fixture" ? "recorded_fixture" : item.provenance.provider === "npm" ? "npm_downloads_api" : "pypistats_public_api",
+            sourceRef: item.provenance.sourceRef,
+            collectedAt: item.provenance.retrievedAt,
+            caveat: item.provenance.caveat,
+          },
+        });
+      });
+      const subject = observations[0]!.subject;
+      const storage = this.openCanonical();
+      try {
+        const existing = storage.metricObservations.list({ ecosystem: input.ecosystem, packageName: subject.canonicalName })
+          .filter((item): item is PackageDownloadObservation => item.source === "npm_registry" || item.source === "pypi");
+        const byId = new Map(observations.map((item) => [item.id, item]));
+        for (const item of existing) byId.set(item.id, item);
+        const ordered = [...byId.values()].sort((a, b) => a.bucket.startAt.localeCompare(b.bucket.startAt));
+        const groups: PackageDownloadObservation[][] = [];
+        for (const item of ordered) {
+          const group = groups.at(-1);
+          if (!group || group.at(-1)!.bucket.endAt !== item.bucket.startAt) groups.push([item]);
+          else group.push(item);
+        }
+        const builtSeries = groups.map((group) => buildPackageDownloadSeries(
+          asId(`trend_package_${createHash("sha256").update(`${subject.externalId}|day|UTC|${group[0]!.bucket.startAt}`).digest("hex").slice(0, 24)}`),
+          group,
+        ));
+        const currentIds = new Set(observations.map((item) => item.id));
+        const built = builtSeries.find((candidate) => candidate.observations.some((item) => currentIds.has(item.id)))!;
+        const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: collected.provenance.retrievedAt });
+        const previousSeries = storage.trendSeries.list({ ecosystem: input.ecosystem, packageName: subject.canonicalName })
+          .filter((item): item is PackageDownloadSeries => item.source === "npm_registry" || item.source === "pypi");
+        const nextSeriesIds = new Set(builtSeries.map((item) => item.series.id));
+        storage.transaction(() => {
+          for (const observation of observations) storage.metricObservations.save(observation);
+          for (const stale of previousSeries.filter((item) => !nextSeriesIds.has(item.id))) {
+            storage.trendEvents.deleteBySeries(stale.id);
+            storage.trendSeries.delete(stale.id);
+          }
+          for (const candidate of builtSeries) storage.trendSeries.save(candidate.series);
+          if (event) storage.trendEvents.append(event);
+          storage.quantitativeSourceStatuses.save({ id: statusId, source: input.ecosystem === "npm" ? "npm_registry" : "pypi", subjectExternalId: subject.externalId, status: "success", itemCount: observations.length, reason: null, checkedAt: collected.provenance.retrievedAt, ecosystem: input.ecosystem, packageName: subject.canonicalName, from: collected.from, to: collected.to, provenance: collected.provenance });
+        });
+        return { observations, series: built.series, event };
+      } finally {
+        storage.close();
+      }
+    } catch (error) {
+      const status = error instanceof PackageDownloadsSourceError ? error.status : "response_drift";
+      const storage = this.openCanonical();
+      try {
+        storage.quantitativeSourceStatuses.save({ id: statusId, source: input.ecosystem === "npm" ? "npm_registry" : "pypi", subjectExternalId: `${input.ecosystem}:${canonicalName}`, status, itemCount: 0, reason: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString(), ecosystem: input.ecosystem, packageName: canonicalName, from: input.from, to: input.to, retryAt: error instanceof PackageDownloadsSourceError ? error.retryAt : null });
+      } finally {
+        storage.close();
+      }
+      throw error;
+    }
+  }
+
+  inspectPackageDownloads(input: { ecosystem: PackageEcosystem; packageName: string; from?: string; to?: string }): { observations: PackageDownloadObservation[]; series: PackageDownloadSeries[]; events: TrendEvent[]; sourceHealth: unknown[] } {
+    const storage = this.openCanonical();
+    try {
+      const canonicalName = canonicalizePackageName(input.ecosystem, input.packageName);
+      const fromAt = input.from ? new Date(`${input.from}T00:00:00.000Z`).toISOString() : null;
+      const toExclusive = input.to ? new Date(Date.parse(`${input.to}T00:00:00.000Z`) + 86_400_000).toISOString() : null;
+      const observations = storage.metricObservations.list({ ecosystem: input.ecosystem, packageName: canonicalName })
+        .filter((item): item is PackageDownloadObservation => (item.source === "npm_registry" || item.source === "pypi") && (!fromAt || item.bucket.startAt >= fromAt) && (!toExclusive || item.bucket.endAt <= toExclusive));
+      const canonicalSeries = storage.trendSeries.list({ ecosystem: input.ecosystem, packageName: canonicalName })
+        .filter((item): item is PackageDownloadSeries => (item.source === "npm_registry" || item.source === "pypi") && (!fromAt || item.startedAt <= fromAt && item.endedAt > fromAt) && (!toExclusive || item.startedAt < toExclusive && item.endedAt >= toExclusive));
+      const observationIds = new Set(observations.map((item) => item.id));
+      const series = canonicalSeries.map((item) => buildPackageDownloadSeries(item.id, observations.filter((observation) => item.observationIds.includes(observation.id))).series);
+      const events = canonicalSeries.flatMap((item) => storage.trendEvents.listBySeries(item.id)).filter((event) =>
+        event.detector === "package_download_delta_v1" && observationIds.has(event.previousObservationId) && observationIds.has(event.currentObservationId),
+      );
+      return { observations, series, events, sourceHealth: storage.quantitativeSourceStatuses.list().filter((item) => item.ecosystem === input.ecosystem && item.packageName === canonicalName) };
+    } finally {
+      storage.close();
     }
   }
 

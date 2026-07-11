@@ -44,6 +44,10 @@ storage.close();
 - `validationExperiments`, `monitorSchedules`, `monitorComparisons`, `agentTasks` — canonical runtime state
 - `metricObservations`, `trendSeries`, `trendEvents`, `quantitativeSourceStatuses` — canonical quantitative observations, derived momentum, provenance, and source health; stable identities and references fail closed
 - `normalizationContexts` — Google Trends relative-scale context; geography, window, comparison set, and partial-bucket identity are preserved so incompatible 0–100 values cannot be combined
+
+Package observations and series index ecosystem, canonical package name, and
+bucket window explicitly. This keeps same-named npm and PyPI packages separate
+and makes PyPI normalization aliases idempotent.
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

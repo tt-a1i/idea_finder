@@ -90,7 +90,7 @@ export interface StoredQuantitativeSourceStatusRecord {
   readonly id: string;
   readonly source: string;
   readonly subjectExternalId: string;
-  readonly status: "success" | "failure" | "partial" | "rate_limited" | "authorization_required" | "throttled" | "unavailable" | "response_drift";
+  readonly status: "success" | "failure" | "partial" | "rate_limited" | "missing_package" | "unavailable_history" | "authorization_required" | "throttled" | "unavailable" | "response_drift";
   readonly itemCount: number;
   readonly reason: string | null;
   readonly checkedAt: string;

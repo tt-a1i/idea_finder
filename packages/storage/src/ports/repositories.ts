@@ -13,6 +13,8 @@ import type {
   TrendSeries,
   GitHubMetric,
   GoogleTrendsMetric,
+  PackageDownloadMetric,
+  PackageEcosystem,
   GoogleTrendsNormalizationContext,
 } from "@idea-finder/core";
 
@@ -50,9 +52,13 @@ export interface CalibrationEventRepository {
 export interface QuantitativeListFilter {
   readonly source?: MetricObservation["source"];
   readonly subjectExternalId?: string;
-  readonly metric?: GitHubMetric | GoogleTrendsMetric;
+  readonly metric?: GitHubMetric | GoogleTrendsMetric | PackageDownloadMetric;
   readonly geography?: string;
   readonly normalizationContextId?: string;
+  readonly ecosystem?: PackageEcosystem;
+  readonly packageName?: string;
+  readonly windowStartAt?: string;
+  readonly windowEndAt?: string;
 }
 
 export interface NormalizationContextRepository {
@@ -71,12 +77,14 @@ export interface TrendSeriesRepository {
   save(series: TrendSeries): void;
   get(id: string): TrendSeries | null;
   list(filter?: QuantitativeListFilter): TrendSeries[];
+  delete(id: string): void;
 }
 
 export interface TrendEventRepository {
   append(event: TrendEvent): void;
   get(id: string): TrendEvent | null;
   listBySeries(seriesId: string): TrendEvent[];
+  deleteBySeries(seriesId: string): void;
 }
 
 export interface PipelineStepStore {

@@ -295,9 +295,20 @@ export type GitHubMetric =
   | "trending_rank";
 
 export type GoogleTrendsMetric = "relative_search_interest";
+export type PackageEcosystem = "npm" | "pypi";
+export type PackageDownloadMetric = "downloads";
 
 export interface MetricSubject {
-  readonly kind: "repository" | "organization" | "topic" | "search_term";
+  readonly kind: "repository" | "organization" | "topic" | "search_term" | "package";
+  readonly externalId: string;
+  readonly url: string;
+}
+
+export interface PackageSubject {
+  readonly kind: "package";
+  readonly ecosystem: PackageEcosystem;
+  readonly name: string;
+  readonly canonicalName: string;
   readonly externalId: string;
   readonly url: string;
 }
@@ -375,7 +386,43 @@ export interface GoogleTrendsMetricObservation {
   readonly provenance: GoogleTrendsObservationProvenance;
 }
 
-export type MetricObservation = GitHubMetricObservation | GoogleTrendsMetricObservation;
+export interface PackageDownloadProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface: "npm_downloads_api" | "pypistats_public_api" | "recorded_fixture";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+  readonly caveat: string | null;
+}
+
+export interface PackageDownloadBucket {
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly resolution: "day" | "week" | "month";
+  readonly timezone: string;
+  readonly coverageDays: number;
+  readonly partial: boolean;
+}
+
+export interface PackageDownloadObservation {
+  readonly id: MetricObservationId;
+  readonly subject: PackageSubject;
+  readonly source: "npm_registry" | "pypi";
+  readonly ecosystem: PackageEcosystem;
+  readonly metric: PackageDownloadMetric;
+  readonly lane: "developer_adoption";
+  readonly geography: null;
+  readonly observedAt: string;
+  readonly bucket: PackageDownloadBucket;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly normalizationMethod: "bucket_count_to_daily_rate_v1";
+  readonly unit: "downloads_per_day";
+  readonly collectionMethod: PackageDownloadProvenance["interface"];
+  readonly provenance: PackageDownloadProvenance;
+}
+
+export type MetricObservation = GitHubMetricObservation | GoogleTrendsMetricObservation | PackageDownloadObservation;
 
 export interface GitHubTrendSeries {
   readonly id: TrendSeriesId;
@@ -402,7 +449,22 @@ export interface GoogleTrendsSeries {
   readonly endedAt: string;
 }
 
-export type TrendSeries = GitHubTrendSeries | GoogleTrendsSeries;
+export interface PackageDownloadSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: PackageSubject;
+  readonly source: "npm_registry" | "pypi";
+  readonly ecosystem: PackageEcosystem;
+  readonly metric: PackageDownloadMetric;
+  readonly lane: "developer_adoption";
+  readonly resolution: PackageDownloadBucket["resolution"];
+  readonly timezone: string;
+  readonly normalizationMethod: "bucket_count_to_daily_rate_v1";
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export type TrendSeries = GitHubTrendSeries | GoogleTrendsSeries | PackageDownloadSeries;
 
 export type TrendEventKind = "momentum_up" | "momentum_down" | "stable";
 
@@ -452,4 +514,19 @@ export interface SearchMomentumTrendEvent {
   readonly rules: SearchMomentumClassifierRules;
 }
 
-export type TrendEvent = DeltaTrendEvent | SearchMomentumTrendEvent;
+export interface PackageDownloadTrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: TrendEventKind;
+  readonly detectedAt: string;
+  readonly previousObservationId: MetricObservationId;
+  readonly currentObservationId: MetricObservationId;
+  readonly previousValue: number;
+  readonly currentValue: number;
+  readonly absoluteDelta: number;
+  readonly relativeDelta: number | null;
+  readonly detector: "package_download_delta_v1";
+  readonly stableRelativeThreshold: number;
+}
+
+export type TrendEvent = DeltaTrendEvent | SearchMomentumTrendEvent | PackageDownloadTrendEvent;

@@ -3,11 +3,14 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   buildTrendSeries,
   buildGoogleTrendSeries,
+  buildPackageDownloadSeries,
   classifySearchMomentum,
   classifyGitHubMetric,
   createGoogleTrendsObservation,
   createGitHubMetricObservation,
+  createPackageDownloadObservation,
   detectLatestTrendEvent,
+  detectLatestPackageDownloadEvent,
   validateGoogleTrendsNormalizationContext,
   type DeltaTrendEvent,
   type GitHubMetricObservation,
@@ -17,6 +20,8 @@ import {
   type GoogleTrendsSeries,
   type SearchMomentumTrendEvent,
   type MetricObservation,
+  type PackageDownloadObservation,
+  type PackageDownloadSeries,
   type TrendEvent,
   type TrendSeries,
 } from "@idea-finder/core";
@@ -36,6 +41,11 @@ function assertIdempotent<T>(existing: T | null, incoming: T, label: string): vo
   if (existing && JSON.stringify(existing) !== JSON.stringify(incoming)) {
     throw new Error(`${label} conflicts with canonical SQLite state`);
   }
+}
+
+function samePackageFact(left: PackageDownloadObservation, right: PackageDownloadObservation): boolean {
+  const normalize = (item: PackageDownloadObservation) => ({ ...item, provenance: { ...item.provenance, collectedAt: "", sourceRef: "" } });
+  return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
 function assertValidObservation(observation: MetricObservation): void {
@@ -60,7 +70,10 @@ function assertValidObservation(observation: MetricObservation): void {
 }
 
 function sameSubject(left: MetricObservation["subject"], right: TrendSeries["subject"]): boolean {
-  return left.kind === right.kind && left.externalId === right.externalId && left.url === right.url;
+  return left.kind === right.kind && left.externalId === right.externalId && left.url === right.url &&
+    (!("ecosystem" in left) || !("ecosystem" in right) || (
+      left.ecosystem === right.ecosystem && left.canonicalName === right.canonicalName
+    ));
 }
 
 function listQuantitative<T>(
@@ -74,6 +87,8 @@ function listQuantitative<T>(
     ["source", filter.source], ["subject_external_id", filter.subjectExternalId],
     ["metric", filter.metric], ["geography", filter.geography],
     ["normalization_context_id", filter.normalizationContextId],
+    ["ecosystem", filter.ecosystem], ["package_name", filter.packageName],
+    ["window_start_at", filter.windowStartAt], ["window_end_at", filter.windowEndAt],
   ] as const) {
     if (value !== undefined) { clauses.push(`${column} = ?`); values.push(value); }
   }
@@ -99,17 +114,22 @@ export function createNormalizationContextRepository(db: DatabaseSync): Normaliz
 
 export function createMetricObservationRepository(db: DatabaseSync): MetricObservationRepository {
   const insert = db.prepare(`INSERT INTO metric_observations
-    (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
   const get = db.prepare("SELECT payload_json FROM metric_observations WHERE id = ?");
   const getIdentity = db.prepare(`SELECT payload_json FROM metric_observations
-    WHERE source = ? AND subject_kind = ? AND subject_external_id = ? AND metric = ? AND observed_at = ? AND collection_method = ? AND geography = ? AND normalization_context_id = ?`);
+    WHERE source = ? AND subject_kind = ? AND subject_external_id = ? AND metric = ? AND observed_at = ? AND collection_method = ? AND geography = ? AND normalization_context_id = ? AND ecosystem = ? AND package_name = ? AND window_start_at = ? AND window_end_at = ?`);
   const getContext = db.prepare("SELECT payload_json FROM normalization_contexts WHERE id = ?");
   return {
     save(observation) {
       assertValidObservation(observation);
       const contextId = observation.source === "google_trends" ? observation.normalizationContextId : "";
       const geography = observation.geography ?? "";
+      const ecosystem = observation.source === "npm_registry" || observation.source === "pypi" ? observation.ecosystem : "";
+      const packageName = observation.source === "npm_registry" || observation.source === "pypi" ? observation.subject.canonicalName : "";
+      const windowStartAt = observation.source === "npm_registry" || observation.source === "pypi" ? observation.bucket.startAt : "";
+      const windowEndAt = observation.source === "npm_registry" || observation.source === "pypi" ? observation.bucket.endAt : "";
+      let persisted = observation;
       if (observation.source === "google_trends") {
         const context = parse<GoogleTrendsNormalizationContext>(getContext.get(contextId) as { payload_json: string } | undefined);
         if (!context) throw new Error(`MetricObservation ${observation.id} references missing NormalizationContext ${contextId}`);
@@ -121,13 +141,33 @@ export function createMetricObservationRepository(db: DatabaseSync): MetricObser
         });
         assertIdempotent(canonical, observation, `MetricObservation ${observation.id}`);
       }
-      insert.run(observation.id, observation.source, observation.subject.kind, observation.subject.externalId,
-        observation.metric, observation.observedAt, observation.collectionMethod, geography, contextId, JSON.stringify(observation));
-      const byId = parse<MetricObservation>(get.get(observation.id) as { payload_json: string } | undefined);
-      const byIdentity = parse<MetricObservation>(getIdentity.get(observation.source, observation.subject.kind,
-        observation.subject.externalId, observation.metric, observation.observedAt, observation.collectionMethod, geography, contextId) as { payload_json: string } | undefined);
-      assertIdempotent(byId, observation, `MetricObservation ${observation.id}`);
-      assertIdempotent(byIdentity, observation, `MetricObservation identity ${observation.subject.externalId}/${observation.metric}/${observation.observedAt}`);
+      if (observation.source === "npm_registry" || observation.source === "pypi") {
+        const canonical = createPackageDownloadObservation({
+          id: observation.id, ecosystem: observation.ecosystem,
+          packageName: observation.subject.canonicalName, bucket: observation.bucket,
+          downloads: observation.rawValue, provenance: observation.provenance,
+        });
+        if (canonical.source !== observation.source || canonical.metric !== observation.metric ||
+          canonical.lane !== observation.lane || canonical.normalizedValue !== observation.normalizedValue ||
+          canonical.normalizationMethod !== observation.normalizationMethod || canonical.unit !== observation.unit ||
+          canonical.collectionMethod !== observation.collectionMethod || canonical.observedAt !== observation.observedAt) {
+          throw new Error(`MetricObservation ${observation.id} conflicts with canonical package values`);
+        }
+        persisted = canonical;
+        const existing = parse<MetricObservation>(get.get(persisted.id) as { payload_json: string } | undefined);
+        if (existing?.source === "npm_registry" || existing?.source === "pypi") {
+          if (samePackageFact(existing, persisted)) return;
+        }
+      }
+      insert.run(persisted.id, persisted.source, persisted.subject.kind, persisted.subject.externalId,
+        persisted.metric, persisted.observedAt, persisted.collectionMethod, geography, contextId,
+        ecosystem, packageName, windowStartAt, windowEndAt, JSON.stringify(persisted));
+      const byId = parse<MetricObservation>(get.get(persisted.id) as { payload_json: string } | undefined);
+      const byIdentity = parse<MetricObservation>(getIdentity.get(persisted.source, persisted.subject.kind,
+        persisted.subject.externalId, persisted.metric, persisted.observedAt, persisted.collectionMethod, geography, contextId,
+        ecosystem, packageName, windowStartAt, windowEndAt) as { payload_json: string } | undefined);
+      assertIdempotent(byId, persisted, `MetricObservation ${persisted.id}`);
+      assertIdempotent(byIdentity, persisted, `MetricObservation identity ${persisted.subject.externalId}/${persisted.metric}/${persisted.observedAt}`);
     },
     get(id) { return parse(get.get(id) as { payload_json: string } | undefined); },
     list(filter) { return listQuantitative(db, "metric_observations", filter); },
@@ -135,13 +175,16 @@ export function createMetricObservationRepository(db: DatabaseSync): MetricObser
 }
 
 export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesRepository {
-  const upsert = db.prepare(`INSERT INTO trend_series (id, source, subject_external_id, metric, geography, normalization_context_id, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,
+  const upsert = db.prepare(`INSERT INTO trend_series (id, source, subject_external_id, metric, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,
     subject_external_id=excluded.subject_external_id, metric=excluded.metric, geography=excluded.geography,
-    normalization_context_id=excluded.normalization_context_id, payload_json=excluded.payload_json`);
+    normalization_context_id=excluded.normalization_context_id, ecosystem=excluded.ecosystem,
+    package_name=excluded.package_name, window_start_at=excluded.window_start_at,
+    window_end_at=excluded.window_end_at, payload_json=excluded.payload_json`);
   const get = db.prepare("SELECT payload_json FROM trend_series WHERE id = ?");
   const getObservation = db.prepare("SELECT payload_json FROM metric_observations WHERE id = ?");
   const getContext = db.prepare("SELECT payload_json FROM normalization_contexts WHERE id = ?");
+  const remove = db.prepare("DELETE FROM trend_series WHERE id = ?");
   return {
     save(series) {
       const observations: MetricObservation[] = [];
@@ -170,7 +213,9 @@ export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesReposi
           })(),
           observations as GoogleTrendsMetricObservation[],
         ).series
-        : buildTrendSeries(series.id, observations as GitHubMetricObservation[]).series;
+        : series.source === "npm_registry" || series.source === "pypi"
+          ? buildPackageDownloadSeries(series.id, observations as PackageDownloadObservation[]).series
+          : buildTrendSeries(series.id, observations as GitHubMetricObservation[]).series;
       if (
         canonical.id !== series.id ||
         canonical.source !== series.source ||
@@ -182,6 +227,11 @@ export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesReposi
           canonical.normalizationContextId !== series.normalizationContextId ||
           JSON.stringify(canonical.window) !== JSON.stringify(series.window)
         )) ||
+        ((canonical.source === "npm_registry" || canonical.source === "pypi") &&
+          (series.source === "npm_registry" || series.source === "pypi") && (
+            canonical.ecosystem !== series.ecosystem || canonical.resolution !== series.resolution ||
+            canonical.timezone !== series.timezone || canonical.normalizationMethod !== series.normalizationMethod
+          )) ||
         canonical.startedAt !== series.startedAt ||
         canonical.endedAt !== series.endedAt ||
         canonical.observationIds.length !== series.observationIds.length ||
@@ -198,10 +248,15 @@ export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesReposi
       upsert.run(series.id, series.source, series.subject.externalId, series.metric,
         series.source === "google_trends" ? series.geography : "",
         series.source === "google_trends" ? series.normalizationContextId : "",
+        series.source === "npm_registry" || series.source === "pypi" ? series.ecosystem : "",
+        series.source === "npm_registry" || series.source === "pypi" ? series.subject.canonicalName : "",
+        series.source === "npm_registry" || series.source === "pypi" ? series.startedAt : "",
+        series.source === "npm_registry" || series.source === "pypi" ? series.endedAt : "",
         JSON.stringify(series));
     },
     get(id) { return parse(get.get(id) as { payload_json: string } | undefined); },
     list(filter) { return listQuantitative(db, "trend_series", filter); },
+    delete(id) { remove.run(id); },
   };
 }
 
@@ -211,6 +266,7 @@ export function createTrendEventRepository(db: DatabaseSync): TrendEventReposito
   const list = db.prepare("SELECT payload_json FROM trend_events WHERE series_id = ? ORDER BY detected_at, id");
   const getSeries = db.prepare("SELECT payload_json FROM trend_series WHERE id = ?");
   const getObservation = db.prepare("SELECT payload_json FROM metric_observations WHERE id = ?");
+  const removeBySeries = db.prepare("DELETE FROM trend_events WHERE series_id = ?");
   return {
     append(event) {
       const series = parse<TrendSeries>(getSeries.get(event.seriesId) as { payload_json: string } | undefined);
@@ -227,6 +283,29 @@ export function createTrendEventRepository(db: DatabaseSync): TrendEventReposito
           }),
         );
         const expected = classifySearchMomentum(series, observations, { detectedAt: event.detectedAt, rules: event.rules });
+        assertIdempotent(expected, event, `TrendEvent ${event.id}`);
+        insert.run(event.id, event.seriesId, event.detectedAt, JSON.stringify(event));
+        assertIdempotent(parse(get.get(event.id) as { payload_json: string } | undefined), event, `TrendEvent ${event.id}`);
+        return;
+      }
+      if (event.detector === "package_download_delta_v1") {
+        if (series.source !== "npm_registry" && series.source !== "pypi") {
+          throw new Error(`TrendEvent ${event.id} requires a package series`);
+        }
+        const observations = new Map(
+          series.observationIds.map((id) => {
+            const observation = parse<MetricObservation>(getObservation.get(id) as { payload_json: string } | undefined);
+            if (!observation || (observation.source !== "npm_registry" && observation.source !== "pypi")) {
+              throw new Error(`TrendEvent ${event.id} references missing package observation ${id}`);
+            }
+            return [id, observation] as const;
+          }),
+        );
+        const expected = detectLatestPackageDownloadEvent(series, observations, {
+          detectedAt: event.detectedAt,
+          stableRelativeThreshold: event.stableRelativeThreshold,
+        });
+        if (!expected) throw new Error(`TrendEvent ${event.id} requires two package observations`);
         assertIdempotent(expected, event, `TrendEvent ${event.id}`);
         insert.run(event.id, event.seriesId, event.detectedAt, JSON.stringify(event));
         assertIdempotent(parse(get.get(event.id) as { payload_json: string } | undefined), event, `TrendEvent ${event.id}`);
@@ -272,5 +351,6 @@ export function createTrendEventRepository(db: DatabaseSync): TrendEventReposito
     listBySeries(seriesId) {
       return (list.all(seriesId) as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as TrendEvent);
     },
+    deleteBySeries(seriesId) { removeBySeries.run(seriesId); },
   };
 }

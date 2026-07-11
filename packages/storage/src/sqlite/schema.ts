@@ -72,8 +72,12 @@ CREATE TABLE IF NOT EXISTS metric_observations (
   collection_method TEXT NOT NULL,
   geography TEXT NOT NULL DEFAULT '',
   normalization_context_id TEXT NOT NULL DEFAULT '',
+  ecosystem TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  window_start_at TEXT NOT NULL DEFAULT '',
+  window_end_at TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL,
-  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id)
+  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
 );
 CREATE INDEX IF NOT EXISTS idx_metric_observations_subject_metric
   ON metric_observations (subject_external_id, metric, observed_at);
@@ -85,6 +89,10 @@ CREATE TABLE IF NOT EXISTS trend_series (
   metric TEXT NOT NULL,
   geography TEXT NOT NULL DEFAULT '',
   normalization_context_id TEXT NOT NULL DEFAULT '',
+  ecosystem TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  window_start_at TEXT NOT NULL DEFAULT '',
+  window_end_at TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trend_series_subject_metric
@@ -284,12 +292,16 @@ export function initSchema(db: DatabaseSync): void {
           collection_method TEXT NOT NULL,
           geography TEXT NOT NULL DEFAULT '',
           normalization_context_id TEXT NOT NULL DEFAULT '',
+          ecosystem TEXT NOT NULL DEFAULT '',
+          package_name TEXT NOT NULL DEFAULT '',
+          window_start_at TEXT NOT NULL DEFAULT '',
+          window_end_at TEXT NOT NULL DEFAULT '',
           payload_json TEXT NOT NULL,
-          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id)
+          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
         );
         INSERT INTO metric_observations
-          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, payload_json)
-        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, '', '', payload_json
+          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, '', '', '', '', '', '', payload_json
         FROM metric_observations_github_v1;
         DROP TABLE metric_observations_github_v1;
         DROP INDEX IF EXISTS idx_metric_observations_subject_metric;
@@ -302,9 +314,42 @@ export function initSchema(db: DatabaseSync): void {
       throw error;
     }
   }
+  const packageColumns = db.prepare("PRAGMA table_info(metric_observations)").all() as Array<{ name: string }>;
+  if (packageColumns.length > 0 && !packageColumns.some((column) => column.name === "ecosystem")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE metric_observations RENAME TO metric_observations_quantitative_v2;
+        CREATE TABLE metric_observations (
+          id TEXT PRIMARY KEY, source TEXT NOT NULL, subject_kind TEXT NOT NULL,
+          subject_external_id TEXT NOT NULL, metric TEXT NOT NULL, observed_at TEXT NOT NULL,
+          collection_method TEXT NOT NULL, geography TEXT NOT NULL DEFAULT '',
+          normalization_context_id TEXT NOT NULL DEFAULT '', ecosystem TEXT NOT NULL DEFAULT '',
+          package_name TEXT NOT NULL DEFAULT '', window_start_at TEXT NOT NULL DEFAULT '',
+          window_end_at TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL,
+          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
+        );
+        INSERT INTO metric_observations
+          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, '', '', '', '', payload_json
+        FROM metric_observations_quantitative_v2;
+        DROP TABLE metric_observations_quantitative_v2;
+        DROP INDEX IF EXISTS idx_metric_observations_subject_metric;
+        CREATE INDEX idx_metric_observations_subject_metric ON metric_observations (subject_external_id, metric, observed_at);
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   const seriesColumns = db.prepare("PRAGMA table_info(trend_series)").all() as Array<{ name: string }>;
   if (seriesColumns.length > 0 && !seriesColumns.some((column) => column.name === "normalization_context_id")) {
     db.exec("ALTER TABLE trend_series ADD COLUMN geography TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN normalization_context_id TEXT NOT NULL DEFAULT '';");
+  }
+  const packageSeriesColumns = db.prepare("PRAGMA table_info(trend_series)").all() as Array<{ name: string }>;
+  if (packageSeriesColumns.length > 0 && !packageSeriesColumns.some((column) => column.name === "ecosystem")) {
+    db.exec("ALTER TABLE trend_series ADD COLUMN ecosystem TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN package_name TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN window_start_at TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN window_end_at TEXT NOT NULL DEFAULT ''; ");
   }
   db.exec(SCHEMA_SQL);
 }

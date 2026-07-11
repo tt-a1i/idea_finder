@@ -8,5 +8,6 @@ export * from "./domain/validation-experiment.js";
 export * from "./domain/monitor-diff.js";
 export * from "./domain/quantitative-trends.js";
 export * from "./domain/google-trends.js";
+export * from "./domain/package-adoption.js";
 export * from "./ports/clock.js";
 export * from "./ports/policy.js";

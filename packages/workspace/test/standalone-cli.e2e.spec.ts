@@ -137,6 +137,18 @@ describe("installed standalone CLI", () => {
     const googleThrottled = await invoke(executable, ["trends", "collect", "google", "blocked term", "--geo", "US", "--from", "2026-01-01T00:00:00Z", "--to", "2026-01-10T00:00:00Z", "--fixture", "--fixture-failure", "throttled", "--workspace", workspace, "--json"], consumer);
     expect(googleThrottled.code).toBe(CLI_EXIT_CODES.partialResult);
     expect(googleThrottled.envelope).toMatchObject({ errors: [{ code: "google_trends.throttled" }], data: { retryAt: "2026-01-11T00:00:00.000Z", sourceHealth: [expect.objectContaining({ status: "throttled", itemCount: 0 })] } });
+    for (const ecosystem of ["npm", "pypi"] as const) {
+      const packageCollected = await invoke(executable, ["trends", "collect", ecosystem, "requests", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--workspace", workspace, "--json"], consumer);
+      expectSuccess(packageCollected, "trends collect");
+      expect(packageCollected.envelope).toMatchObject({ data: { observations: expect.any(Array), event: { kind: "momentum_up" } } });
+      const packageInspected = await invoke(executable, ["trends", "inspect", "package", "--ecosystem", ecosystem, "--package", "requests", "--from", "2026-01-01", "--to", "2026-01-03", "--workspace", workspace, "--json"], consumer);
+      expectSuccess(packageInspected, "trends inspect");
+      expect(packageInspected.envelope).toMatchObject({ data: { observations: expect.any(Array), events: [expect.objectContaining({ kind: "momentum_up" })] } });
+      expect((packageInspected.envelope.data as { observations: unknown[] }).observations).toHaveLength(3);
+    }
+    const packagedMissing = await invoke(executable, ["trends", "collect", "pypi", "missing-package", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--fixture-failure", "missing_package", "--workspace", workspace, "--json"], consumer);
+    expect(packagedMissing.code).toBe(CLI_EXIT_CODES.missingResource);
+    expect(packagedMissing.envelope).toMatchObject({ errors: [{ code: "package_downloads.missing_package" }], data: { sourceHealth: [expect.objectContaining({ ecosystem: "pypi", status: "missing_package" })] } });
     expectSuccess(await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer), "export");
     expectSuccess(await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer), "agent list");
     const agent = await invoke(executable, ["agent", "create", "--kind", "research", "--intent", "inspect evidence", "--workspace", workspace, "--json"], consumer);

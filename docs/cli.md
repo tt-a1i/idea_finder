@@ -133,6 +133,22 @@ Detected outcomes are `spike`, `seasonal`, `sustained_growth`,
 data, and response drift remain visible source-health states and never become
 silent zero observations.
 
+Package adoption uses ecosystem-qualified identity and explicit date windows:
+
+```bash
+idea-finder trends collect npm @scope/package --from 2026-01-01 --to 2026-01-31 --json
+idea-finder trends collect pypi Requests --from 2026-01-01 --to 2026-01-31 --json
+idea-finder trends inspect package --ecosystem pypi --package Requests --json
+```
+
+npm collection uses the official public downloads API. PyPI download counts are
+collected from the third-party pypistats public API and retain that caveat in
+provenance; they are never represented as official PyPI statistics. npm scoped
+names and PEP 503-normalized PyPI names remain distinct ecosystem identities.
+Counts are normalized to downloads per covered day and remain developer-adoption
+evidence only. Rate limits, missing packages, unavailable history, and response
+drift are persisted as structured source-health states rather than zero counts.
+
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an
 unambiguous list-to-inspect path across Briefs and historical runs. Commands

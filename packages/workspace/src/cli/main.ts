@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
-import { GoogleTrendsSourceError, type GoogleTrendsTransport, type QuantitativeConnector } from "@idea-finder/connectors";
+import { GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
@@ -61,6 +61,8 @@ Usage:
   idea-finder monitor schedule <brief> --cadence <manual|daily|weekly> [--enabled <true|false>]
   idea-finder trends collect github <owner/repository> [--since <iso-time>] [--fixture]
   idea-finder trends collect google <subject> --geo <CC|WORLDWIDE> --from <iso> --to <iso> [--granularity <day|week>] [--fixture] [--fixture-pattern <spike|seasonal|sustained|insufficient>]
+  idea-finder trends collect <npm|pypi> <package> --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--fixture]
+  idea-finder trends inspect package --ecosystem <npm|pypi> --package <name> [--from <iso>] [--to <iso>]
   idea-finder trends inspect google <subject> [--geo <CC|WORLDWIDE>] [--from <iso>] [--to <iso>]
   idea-finder trends observations [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends series [--subject <owner/repository>] [--metric <metric>]
@@ -154,7 +156,7 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
   "monitor schedule": { valueFlags: ["--cadence", "--enabled"], positionalCount: 3 },
   "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars", "--geo", "--from", "--to", "--granularity", "--fixture-pattern", "--fixture-failure"], booleanFlags: ["--fixture"], positionalCount: 4 },
-  "trends inspect": { valueFlags: ["--geo", "--from", "--to"], positionalCount: 4 },
+  "trends inspect": { valueFlags: ["--geo", "--from", "--to", "--ecosystem", "--package"], positionalCount: 4 },
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
@@ -345,6 +347,39 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   }
 
   if (cmd === "trends" && sub === "collect") {
+    if (rest[0] === "npm" || rest[0] === "pypi") {
+      const ecosystem = rest[0];
+      const packageName = required(rest[1], "package.name_required", `trends collect ${ecosystem} requires <package>`);
+      const from = required(flag(rest, "--from"), "package.from_required", "Package collection requires --from");
+      const to = required(flag(rest, "--to"), "package.to_required", "Package collection requires --to");
+      const validDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && new Date(`${value}T00:00:00.000Z`).toISOString().startsWith(value);
+      if (!validDay(from) || !validDay(to) || Date.parse(from) > Date.parse(to)) throw new CliFailure("validation", "package.window_invalid", "Package downloads require real YYYY-MM-DD dates with from <= to", CLI_EXIT_CODES.validation);
+      const failureRaw = flag(rest, "--fixture-failure");
+      const failure = failureRaw ? oneOf(failureRaw, ["rate_limited", "missing_package", "unavailable_history", "response_drift"] as const, "fixture-failure") : undefined;
+      const fixtureConnector: PackageDownloadsConnector | undefined = has(rest, "--fixture") ? {
+        ecosystem,
+        async collect(request) {
+          if (failure) throw new PackageDownloadsSourceError(failure, `Recorded ${failure} fixture`, failure === "rate_limited" ? "2026-02-01T00:00:00.000Z" : null);
+          const start = Date.parse(`${request.from}T00:00:00.000Z`);
+          const end = Date.parse(`${request.to}T00:00:00.000Z`);
+          const days = Array.from({ length: Math.floor((end - start) / 86_400_000) + 1 }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
+          const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: `fixture://${ecosystem}-downloads`, retrievedAt: "2026-02-01T00:00:00.000Z", caveat: "Recorded deterministic fixture" };
+          return { ecosystem, package: request.package, from: request.from, to: request.to, provenance, buckets: days.map((day) => ({ id: `pkg_fixture_${ecosystem}_${day}`, ecosystem, package: request.package, subject: `${ecosystem}:${request.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })) };
+        },
+      } : undefined;
+      const service = svc(workspaceDir);
+      try {
+        const result = await service.collectPackageDownloads({ ecosystem, packageName, from, to, connector: fixtureConnector });
+        return { command: "trends collect", data: { ...result, sourceHealth: service.inspectPackageDownloads({ ecosystem, packageName }).sourceHealth }, human: `Collected ${result.observations.length} ${ecosystem} download observations for ${packageName}` };
+      } catch (error) {
+        if (error instanceof PackageDownloadsSourceError) {
+          const sourceHealth = service.inspectPackageDownloads({ ecosystem, packageName }).sourceHealth;
+          const missing = error.status === "missing_package";
+          throw new CliFailure(missing ? "missing-resource" : "partial-result", `package_downloads.${error.status}`, error.message, missing ? CLI_EXIT_CODES.missingResource : CLI_EXIT_CODES.partialResult, { sourceHealth, retryAt: error.retryAt });
+        }
+        throw error;
+      }
+    }
     if (rest[0] === "google") {
       const subject = required(rest[1], "trends.subject_required", "trends collect google requires <subject>");
       const geography = required(flag(rest, "--geo"), "trends.geo_required", "Google Trends collection requires --geo");
@@ -415,6 +450,12 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   }
 
   if (cmd === "trends" && sub === "inspect") {
+    if (rest[0] === "package") {
+      const ecosystem = oneOf(required(flag(rest, "--ecosystem"), "package.ecosystem_required", "Package inspection requires --ecosystem"), ["npm", "pypi"] as const, "ecosystem");
+      const packageName = required(flag(rest, "--package"), "package.name_required", "Package inspection requires --package");
+      const result = svc(workspaceDir).inspectPackageDownloads({ ecosystem, packageName, from: flag(rest, "--from"), to: flag(rest, "--to") });
+      return { command: "trends inspect", data: result, human: `${ecosystem} ${packageName}: ${result.observations.length} observations, ${result.events.length} events` };
+    }
     if (rest[0] !== "google") usageFailure("trends.source_required", "trends inspect requires google <subject>");
     const subject = required(rest[1], "trends.subject_required", "trends inspect google requires <subject>");
     const result = svc(workspaceDir).inspectGoogleTrends({ subject, geography: flag(rest, "--geo"), from: flag(rest, "--from"), to: flag(rest, "--to") });
