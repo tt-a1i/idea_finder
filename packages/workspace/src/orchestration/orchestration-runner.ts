@@ -26,6 +26,7 @@ import {
 export interface OrchestrationRunnerOptions {
   readonly workspaceRoot: string;
   readonly harvestMode?: "manual" | "l0";
+  readonly connectors?: readonly SourceConnector[];
 }
 
 function createConnectors(
@@ -51,7 +52,7 @@ export function createOrchestrationResearchRunner(
         const harvestRepo = createStorageHarvestRepository(storage);
         const harvestMode = options.harvestMode ?? resolveHarvestMode(brief);
         const harvest = createHarvestPipeline({
-          connectors: createConnectors(brief, harvestMode),
+          connectors: options.connectors ?? createConnectors(brief, harvestMode),
           repository: harvestRepo,
         });
 
@@ -104,21 +105,7 @@ export function createOrchestrationResearchRunner(
         }
 
         const documents = storage.rawDocuments.listByRun(run.id);
-        const configuredSources = resolveHarvestMode(brief) === "manual"
-          ? ["manual"]
-          : [...new Set([
-              ...queryPlan.searches.map((search) => search.platform),
-              ...(queryPlan.manualImports?.length ? ["manual"] : []),
-            ])];
-        const sourceStatuses = configuredSources.map((source) => ({
-          id: source,
-          source,
-          status: completed.status === "failed" ? "failure" as const : "success" as const,
-          itemCount: documents.filter((document) => document.platform === source).length,
-          reason: completed.errorMessage,
-          completedAt: completed.completedAt ?? new Date().toISOString(),
-        }));
-        for (const status of sourceStatuses) storage.sourceStatuses.save(run.id, status);
+        const sourceStatuses = storage.sourceStatuses.listByRun(run.id) as never;
 
         return {
           execution: request.execution,

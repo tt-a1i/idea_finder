@@ -13,12 +13,11 @@ import type {
 } from "./research-runner.js";
 
 /** Fixture-backed runner — no live connectors or LLM. */
-export function createFixtureResearchRunner(): ResearchRunner {
+export type FixtureSourceScenario = "success" | "mixed" | "unauthorized" | "throttled" | "zero";
+
+export function createFixtureResearchRunner(sourceScenario: FixtureSourceScenario = "success"): ResearchRunner {
   return {
     async run(brief, request): Promise<ResearchRunOutput> {
-      if (request.execution !== "new") {
-        throw new Error("Fixture mode only supports new ResearchRuns");
-      }
       const now = new Date().toISOString();
       const evidenceById = new Map(invoicingFixture.evidence.map((item) => [item.id, item]));
       const chunksById = new Map(invoicingFixture.chunks.map((item) => [item.id, item]));
@@ -26,30 +25,41 @@ export function createFixtureResearchRunner(): ResearchRunner {
       const admission = admitToLibrary(invoicingFixture.drafts, evidenceById, chunksById, signalsById);
       const rejectedByDraft = new Map(admission.rejected.map((item) => [item.draftId, item]));
       const effectiveConfig = effectiveResearchConfig(brief);
+      const recovering = request.execution !== "new";
+      const empty = sourceScenario === "zero";
+      const incompleteStatus = sourceScenario === "success" || sourceScenario === "zero" ? null : sourceScenario;
+      const retainedStatus = { id: "fixture:retained", requestKey: "fixture:retained", source: "fixture_retained", status: "success" as const, itemCount: empty ? 0 : invoicingFixture.chunks.length, reasonCode: empty ? "zero_results" as const : "none" as const, reason: null, startedAt: now, completedAt: now, retryAt: null };
+      const sourceStatuses = incompleteStatus ? [retainedStatus, {
+        id: "fixture:recoverable", requestKey: "fixture:recoverable", source: "fixture_recoverable",
+        status: incompleteStatus === "mixed" ? "unavailable" as const : incompleteStatus,
+        itemCount: 0, reasonCode: incompleteStatus === "mixed" ? "unavailable" as const : incompleteStatus,
+        reason: incompleteStatus === "mixed" ? "Recorded source unavailable" : `Recorded ${incompleteStatus} source`,
+        startedAt: now, completedAt: now, retryAt: incompleteStatus === "throttled" ? "2026-07-11T00:01:00.000Z" : null,
+      }] : [retainedStatus, { ...retainedStatus, id: "fixture:recoverable", requestKey: "fixture:recoverable", source: "fixture_recoverable" }];
       return {
         execution: request.execution,
         run: {
           id: request.runId,
           huntingTaskId: request.taskId,
-          status: "completed",
+          status: incompleteStatus ? "partial" : "completed",
           startedAt: now,
           completedAt: now,
           configHash: effectiveResearchConfigHash(brief),
-          errorMessage: null,
+          errorMessage: incompleteStatus ? sourceStatuses[1]!.reason : null,
         },
         documents: [],
-        chunks: [...invoicingFixture.chunks],
-        signals: [...invoicingFixture.signals],
-        evidence: [...invoicingFixture.evidence],
-        drafts: [...invoicingFixture.drafts],
-        opportunities: admission.admitted,
-        admissionResults: invoicingFixture.drafts.map((draft) => ({
+        chunks: empty || recovering ? [] : [...invoicingFixture.chunks],
+        signals: empty || recovering ? [] : [...invoicingFixture.signals],
+        evidence: empty || recovering ? [] : [...invoicingFixture.evidence],
+        drafts: empty || recovering ? [] : [...invoicingFixture.drafts],
+        opportunities: empty || recovering ? [] : admission.admitted,
+        admissionResults: (empty || recovering ? [] : invoicingFixture.drafts).map((draft) => ({
           id: draft.id,
           decision: admission.admitted.some((item) => item.id === `opp_${draft.id}`) ? "admitted" : "rejected",
           opportunityId: admission.admitted.find((item) => item.id === `opp_${draft.id}`)?.id ?? null,
           issues: rejectedByDraft.get(draft.id)?.issues ?? [],
         })),
-        sourceStatuses: [{ id: "fixture", source: "fixture", status: "success", itemCount: invoicingFixture.chunks.length, reason: null, completedAt: now }],
+        sourceStatuses: recovering ? [sourceStatuses.find((status) => status.id === "fixture:recoverable")!] : sourceStatuses,
         config: { id: request.runId, effectiveConfig, execution: request.execution },
       };
     },

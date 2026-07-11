@@ -34,6 +34,7 @@ export type OrchestratorStores = Pick<
   | "libraryAdmissionResults"
   | "calibrationEvents"
   | "pipelineSteps"
+  | "sourceStatuses"
   | "audit"
 >;
 
@@ -111,19 +112,23 @@ export function createResearchRunOrchestrator(
       }
 
       try {
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest)) {
-          await harvest.runHarvest(runId, options.queryPlan);
-          stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.harvest);
-        }
+        const harvestAlreadyComplete = stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest);
+        const priorStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ id: string; status: string }>;
+        const completedRequestKeys = new Set(priorStatuses.filter((item) => item.status === "success").map((item) => item.id));
+        const harvestResult = harvestAlreadyComplete ? null : await harvest.runHarvest(runId, options.queryPlan, { completedRequestKeys });
+        for (const status of harvestResult?.sourceExecutions ?? []) stores.sourceStatuses.save(runId, status);
+        const sourceStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ status: string; reason: string | null }>;
+        const incompleteSources = sourceStatuses.filter((item) => item.status !== "success");
+        const hasSuccessfulSource = sourceStatuses.some((item) => item.status === "success");
+        if (!harvestAlreadyComplete && incompleteSources.length === 0) stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.harvest);
+        if (!hasSuccessfulSource && incompleteSources.length > 0) throw new Error(incompleteSources.map((item) => item.reason).filter(Boolean).join("; ") || "All research sources failed");
 
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence)) {
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || incompleteSources.length > 0) {
           await intelligence.run(runId);
           stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);
         }
 
-        if (
-          !stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission)
-        ) {
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission) || incompleteSources.length > 0) {
           await admitRunToLibrary(runId, stores);
           stores.pipelineSteps.markComplete(
             runId,
@@ -133,19 +138,19 @@ export function createResearchRunOrchestrator(
 
         run = {
           ...run,
-          status: "completed",
+          status: incompleteSources.length > 0 ? "partial" : "completed",
           completedAt: new Date().toISOString(),
-          errorMessage: null,
+          errorMessage: incompleteSources.length > 0 ? incompleteSources.map((item) => item.reason).filter(Boolean).join("; ") : null,
         };
         stores.researchRuns.save(run);
 
         await stores.audit.append({
           at: new Date().toISOString(),
           actor: "pipeline",
-          action: "opportunity.promote",
+          action: incompleteSources.length > 0 ? "opportunity.needs_more_evidence" : "opportunity.promote",
           resource: runId,
           payload: {
-            step: "pipeline_complete",
+            step: incompleteSources.length > 0 ? "pipeline_partial" : "pipeline_complete",
             opportunityCount: stores.opportunities.listByRun(runId).length,
           },
         });

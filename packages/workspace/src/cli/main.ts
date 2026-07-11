@@ -6,6 +6,7 @@ import type { CalibrationAction, GitHubMetric, ValidationExperimentType, Validat
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
 import { WorkspaceService } from "../workspace-service.js";
+import { createFixtureResearchRunner, type FixtureSourceScenario } from "../ports/runner-impl.js";
 import {
   CLI_CONTRACT_VERSION,
   CLI_EXIT_CODES,
@@ -121,10 +122,11 @@ function usageFailure(code: string, message: string): never {
   throw new CliFailure("usage", code, message, CLI_EXIT_CODES.usage);
 }
 
-function svc(workspaceDir: string, mode: "fixture" | "orchestration" = "orchestration"): WorkspaceService {
+function svc(workspaceDir: string, mode: "fixture" | "orchestration" = "orchestration", fixtureSourceScenario?: FixtureSourceScenario): WorkspaceService {
   return new WorkspaceService({
     paths: resolveWorkspacePaths(workspaceDir),
     runnerMode: mode,
+    runner: mode === "fixture" && fixtureSourceScenario ? createFixtureResearchRunner(fixtureSourceScenario) : undefined,
   });
 }
 
@@ -147,7 +149,7 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
   "brief create": { valueFlags: ["--title", "--description", "--lens", "--manual-import", "--github-repo", "--google-subject", "--google-geo", "--npm-package", "--pypi-package", "--from", "--to"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
-  run: { valueFlags: ["--retry", "--resume"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
+  run: { valueFlags: ["--retry", "--resume", "--fixture-source-outcome"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
   inbox: { valueFlags: ["--brief"], positionalCount: 1 },
   library: { valueFlags: ["--brief"], positionalCount: 1 },
   "library inspect": { valueFlags: ["--run"], positionalCount: 3 },
@@ -163,7 +165,7 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
-  "research run": { valueFlags: ["--fixture-set"], positionalCount: 3 },
+  "research run": { valueFlags: ["--fixture-set", "--retry", "--resume"], positionalCount: 3 },
   "research inspect": { valueFlags: ["--claim"], positionalCount: 3 },
   "research follow-up": { valueFlags: ["--proposal", "--create"], positionalCount: 3 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
@@ -263,11 +265,11 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     if ([retryRunId, resumeRunId].filter(Boolean).length > 1) {
       throw new CliFailure("validation", "run.execution_conflict", "Use only one of --retry or --resume", CLI_EXIT_CODES.validation);
     }
-    if (fixture && (retryRunId || resumeRunId)) {
-      throw new CliFailure("validation", "run.fixture_named_run_forbidden", "Fixture mode cannot retry or resume a persisted run", CLI_EXIT_CODES.validation);
-    }
+    const fixtureSourceRaw = flag(rest, "--fixture-source-outcome");
+    const fixtureSourceScenario = fixtureSourceRaw ? oneOf(fixtureSourceRaw, ["success", "mixed", "unauthorized", "throttled", "zero"] as const, "fixture-source-outcome") : undefined;
+    if (fixtureSourceScenario && !fixture) throw new CliFailure("validation", "run.fixture_source_requires_fixture", "--fixture-source-outcome requires --fixture", CLI_EXIT_CODES.validation);
     const execution = retryRunId ? "retried" : resumeRunId ? "resumed" : "new";
-    const stored = await svc(workspaceDir, fixture ? "fixture" : "orchestration").runResearch(brief, {
+    const stored = await svc(workspaceDir, fixture ? "fixture" : "orchestration", fixtureSourceScenario).runResearch(brief, {
       execution,
       runId: (retryRunId ?? resumeRunId) as never,
     });
@@ -280,11 +282,17 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
         { execution: stored.execution, run: stored.run },
       );
     }
-    const incomplete = stored.run.status === "partial" ? ["ResearchRun completed with partial results"] : undefined;
+    const incompleteStatuses = (stored.sourceStatuses ?? []).filter((status) => status.status !== "success");
+    const incomplete = stored.run.status === "partial"
+      ? incompleteStatuses.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`)
+      : undefined;
+    const coverage = incompleteStatuses.length === 0
+      ? "all required sources complete"
+      : `incomplete sources: ${incompleteStatuses.map((status) => `${status.source}=${status.status}`).join(", ")}`;
     return {
       command: "run",
       data: stored,
-      human: `Run ${stored.run.id} ${stored.execution} → ${stored.run.status} — admitted ${stored.admittedCount} opportunities (${stored.rejected.length} rejected)`,
+      human: `Run ${stored.run.id} ${stored.execution} → ${stored.run.status} — admitted ${stored.admittedCount} opportunities (${stored.rejected.length} rejected); ${coverage}${incompleteStatuses.length > 0 ? "; conclusions remain conditional" : ""}`,
       incompleteness: incomplete,
       exitCode: incomplete ? CLI_EXIT_CODES.partialResult : undefined,
     };
@@ -484,15 +492,24 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   if (cmd === "research" && sub === "run") {
     const brief = required(rest[0], "research.brief_required", "research run requires <brief>");
     const fixtureSetRaw = flag(rest, "--fixture-set");
-    const fixtureSet = fixtureSetRaw ? oneOf(fixtureSetRaw, ["representative"] as const, "fixture-set") : undefined;
-    const report = await svc(workspaceDir).runMultiLaneResearch(brief, { fixtureSet });
-    return { command: "research run", data: { summary: report.summary, runId: report.runId }, human: `Multi-lane research ${report.runId}: ${report.claims.length} claims; ${report.summary.candidates.filter((item) => item.status === "unvalidated").length} unvalidated candidates` };
+    const fixtureSet = fixtureSetRaw ? oneOf(fixtureSetRaw, ["representative", "google-throttled", "github-unauthorized", "npm-unavailable"] as const, "fixture-set") : undefined;
+    const retryRunId = flag(rest, "--retry"); const resumeRunId = flag(rest, "--resume");
+    if (retryRunId && resumeRunId) throw new CliFailure("validation", "research.execution_conflict", "Use only one of --retry or --resume", CLI_EXIT_CODES.validation);
+    const execution = retryRunId ? "retried" : resumeRunId ? "resumed" : "new";
+    const report = await svc(workspaceDir).runMultiLaneResearch(brief, { fixtureSet, execution, runId: (retryRunId ?? resumeRunId) as never });
+    const sourceStatuses = svc(workspaceDir).listResearchSourceStatuses(report.runId);
+    const incomplete = sourceStatuses.filter((status) => status.status !== "success");
+    const reasons = incomplete.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`);
+    return { command: "research run", data: { summary: report.summary, runId: report.runId, execution, sourceStatuses }, human: `Multi-lane research ${report.runId}: ${report.claims.length} claims; ${report.summary.candidates.filter((item) => item.status === "unvalidated").length} unvalidated candidates; ${incomplete.length ? `incomplete lanes: ${incomplete.map((item) => item.source).join(", ")}; conclusions remain conditional` : "all required lanes complete"}`, incompleteness: reasons.length ? reasons : undefined, exitCode: reasons.length ? CLI_EXIT_CODES.partialResult : undefined };
   }
 
   if (cmd === "research" && sub === "inspect") {
     const runId = required(rest[0], "research.run_required", "research inspect requires <runId>");
     const result = svc(workspaceDir).inspectMultiLaneResearch(runId as never, flag(rest, "--claim"));
-    return { command: "research inspect", data: { runId, summary: result.report.summary, claims: result.claims, details: result.details, independence: result.independence, proposals: result.proposals }, human: `Research ${runId}: ${result.claims.length} claims, ${result.details.length} evidence details` };
+    const sourceStatuses = svc(workspaceDir).listResearchSourceStatuses(runId as never);
+    const incomplete = sourceStatuses.filter((status) => status.status !== "success");
+    const reasons = incomplete.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`);
+    return { command: "research inspect", data: { runId, summary: result.report.summary, claims: result.claims, details: result.details, independence: result.independence, proposals: result.proposals, sourceStatuses }, human: `Research ${runId}: ${result.claims.length} claims, ${result.details.length} evidence details; ${incomplete.length ? `incomplete lanes: ${incomplete.map((item) => item.source).join(", ")}; conclusions remain conditional` : "all required lanes complete"}`, incompleteness: reasons.length ? reasons : undefined, exitCode: reasons.length ? CLI_EXIT_CODES.partialResult : undefined };
   }
 
   if (cmd === "research" && sub === "follow-up") {
@@ -576,7 +593,8 @@ function classify(error: unknown): CliFailure {
 }
 
 export function createMachineEnvelope(command: string, result?: CommandResult, failure?: CliFailure): CliMachineEnvelope {
-  const reasons = result?.incompleteness ?? [];
+  const partialFailure = failure?.category === "partial-result";
+  const reasons = result?.incompleteness ?? (partialFailure ? [failure.message] : []);
   const errors: CliStructuredError[] = failure
     ? [{ category: failure.category, code: failure.code, message: failure.message, details: failure.details }]
     : reasons.length > 0
@@ -585,7 +603,7 @@ export function createMachineEnvelope(command: string, result?: CommandResult, f
   return {
     contractVersion: CLI_CONTRACT_VERSION,
     command,
-    status: failure ? "error" : reasons.length > 0 ? "partial" : "success",
+    status: partialFailure || (!failure && reasons.length > 0) ? "partial" : failure ? "error" : "success",
     data: failure?.details ?? result?.data ?? null,
     warnings: result?.warnings ?? [],
     incompleteness: { incomplete: reasons.length > 0, reasons },

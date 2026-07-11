@@ -36,10 +36,15 @@ export interface LibraryAdmissionRecord {
 export interface ResearchSourceStatus {
   readonly id: string;
   readonly source: string;
-  readonly status: "success" | "failure";
+  readonly requestKey: string;
+  readonly status: "success" | "failure" | "skipped" | "unauthorized" | "throttled" | "unavailable";
   readonly itemCount: number;
+  readonly reasonCode: "none" | "zero_results" | "unauthorized" | "throttled" | "unavailable" | "failed" | "connector_missing";
   readonly reason: string | null;
+  readonly startedAt: string;
   readonly completedAt: string;
+  readonly retryAt: string | null;
+  readonly artifactIds?: readonly string[];
 }
 
 export interface ManualImportConfig {

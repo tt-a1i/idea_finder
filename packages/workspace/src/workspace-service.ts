@@ -97,6 +97,31 @@ const CONNECTOR_METRICS: Readonly<Record<string, GitHubMetric>> = {
   "github.repository.contributors": "contributors",
 };
 
+function quantitativeSourceStatus(input: { id: string; source: string; status?: ResearchSourceStatus["status"]; itemCount?: number; reason?: string | null; startedAt: string; retryAt?: string | null; artifactIds?: readonly string[] }): ResearchSourceStatus {
+  const status = input.status ?? "success";
+  const reasonCode: ResearchSourceStatus["reasonCode"] = status === "success" ? (input.itemCount === 0 ? "zero_results" : "none") : status === "unauthorized" ? "unauthorized" : status === "throttled" ? "throttled" : status === "unavailable" ? "unavailable" : "failed";
+  return { id: input.id, requestKey: input.id, source: input.source, status, itemCount: input.itemCount ?? 0, reasonCode, reason: input.reason ?? null, startedAt: input.startedAt, completedAt: new Date().toISOString(), retryAt: input.retryAt ?? null, artifactIds: input.artifactIds };
+}
+
+function failedQuantitativeSourceStatus(id: string, source: string, error: unknown, startedAt: string): ResearchSourceStatus {
+  const reason = error instanceof Error ? error.message : String(error);
+  const lower = reason.toLowerCase();
+  const status: ResearchSourceStatus["status"] = /authoriz|credential|401|token required/.test(lower) ? "unauthorized" : /thrott|rate.?limit|429|retry-after/.test(lower) ? "throttled" : /unavailable|timeout|network|fetch failed|http 5\d\d/.test(lower) ? "unavailable" : "failure";
+  const retryAt = typeof error === "object" && error !== null ? ((error as { retryAt?: unknown; resetAt?: unknown }).retryAt ?? (error as { resetAt?: unknown }).resetAt) : null;
+  return quantitativeSourceStatus({ id, source, status, reason, startedAt, retryAt: typeof retryAt === "string" ? retryAt : null });
+}
+
+interface RunSourceCheckpoint { readonly runId: ResearchRunId; readonly id: string; readonly source: string; readonly startedAt: string }
+
+class QuantitativePersistenceError extends Error {
+  constructor(readonly original: unknown) { super(original instanceof Error ? original.message : String(original)); }
+}
+
+function commitQuantitative(storage: LocalStorage, operation: () => void): void {
+  try { storage.transaction(operation); }
+  catch (error) { throw new QuantitativePersistenceError(error); }
+}
+
 function summarizeInbox(signals: readonly RawSignal[]): InboxSignalSummary[] {
   const byType = new Map<string, RawSignal[]>();
   for (const signal of signals) {
@@ -517,27 +542,39 @@ export class WorkspaceService {
     const output = await runner.run(brief, { runId, taskId: brief.id, execution });
     const run = output.run;
 
+    const prior = execution === "new" ? null : this.openCanonical();
+    const mergeById = <T extends { id: string }>(before: readonly T[], after: readonly T[]): T[] => [...new Map([...before, ...after].map((item) => [item.id, item])).values()];
+    const documents = mergeById(prior?.rawDocuments.listByRun(run.id) ?? [], output.documents);
+    const chunks = mergeById(prior?.chunks.listByRun(run.id) ?? [], output.chunks);
+    const signals = mergeById(prior?.rawSignals.listByRun(run.id) ?? [], output.signals);
+    const evidence = mergeById(prior?.evidenceItems.listByRun(run.id) ?? [], output.evidence);
+    const drafts = mergeById(prior?.opportunityDrafts.listByRun(run.id) ?? [], output.drafts);
+    const opportunities = mergeById(prior?.opportunities.listByRun(run.id) ?? [], output.opportunities);
+    const admissionResults = mergeById(prior?.libraryAdmissionResults.listByRun(run.id) as LibraryAdmissionRecord[] ?? [], output.admissionResults);
+    const sourceStatuses = mergeById(prior?.sourceStatuses.listByRun(run.id) as ResearchSourceStatus[] ?? [], output.sourceStatuses);
+    prior?.close();
+
     const storage = this.openCanonical();
     try {
       storage.researchRuns.save(run);
       storage.researchRunConfigs.save(output.config);
-      for (const document of output.documents) storage.rawDocuments.save(run.id, document);
-      for (const chunk of output.chunks) storage.chunks.save(run.id, chunk);
-      for (const signal of output.signals) storage.rawSignals.save(run.id, signal);
-      for (const evidence of output.evidence) storage.evidenceItems.save(run.id, evidence);
-      for (const draft of output.drafts) storage.opportunityDrafts.save(run.id, draft);
-      for (const opportunity of output.opportunities) storage.opportunities.save(run.id, opportunity);
-      for (const result of output.admissionResults) storage.libraryAdmissionResults.save(run.id, result);
-      for (const status of output.sourceStatuses) storage.sourceStatuses.save(run.id, status);
+      for (const document of documents) storage.rawDocuments.save(run.id, document);
+      for (const chunk of chunks) storage.chunks.save(run.id, chunk);
+      for (const signal of signals) storage.rawSignals.save(run.id, signal);
+      for (const item of evidence) storage.evidenceItems.save(run.id, item);
+      for (const draft of drafts) storage.opportunityDrafts.save(run.id, draft);
+      for (const opportunity of opportunities) storage.opportunities.save(run.id, opportunity);
+      for (const result of admissionResults) storage.libraryAdmissionResults.save(run.id, result);
+      for (const status of sourceStatuses) storage.sourceStatuses.save(run.id, status);
     } finally {
       storage.close();
     }
 
-    const rejected = output.admissionResults
+    const rejected = admissionResults
       .filter((result) => result.decision === "rejected")
       .map((result) => ({
         draftId: result.id as never,
-        draft: output.drafts.find((draft) => draft.id === result.id)!,
+        draft: drafts.find((draft) => draft.id === result.id)!,
         issues: [...result.issues],
       }));
 
@@ -545,17 +582,11 @@ export class WorkspaceService {
       execution: output.execution,
       run,
       briefId: brief.id,
-      documents: output.documents,
-      chunks: output.chunks,
-      signals: output.signals,
-      evidence: output.evidence,
-      drafts: output.drafts,
-      opportunities: output.opportunities,
+      documents, chunks, signals, evidence, drafts, opportunities,
       rejected,
-      admissionResults: output.admissionResults,
-      sourceStatuses: output.sourceStatuses,
-      admittedCount: output.opportunities.length,
-      inbox: summarizeInbox(output.signals),
+      admissionResults, sourceStatuses,
+      admittedCount: opportunities.length,
+      inbox: summarizeInbox(signals),
     };
     return completedRun;
   }
@@ -902,6 +933,7 @@ export class WorkspaceService {
     since?: string;
     apiBase?: string;
     connector?: QuantitativeConnector;
+    runSource?: RunSourceCheckpoint;
   }): Promise<{
     observations: readonly MetricObservation[];
     series: readonly TrendSeries[];
@@ -937,7 +969,7 @@ export class WorkspaceService {
       try {
         const series: TrendSeries[] = [];
         const events: TrendEvent[] = [];
-        storage.transaction(() => {
+        commitQuantitative(storage, () => {
           for (const observation of observations) storage.metricObservations.save(observation);
           for (const metric of [...new Set(observations.map((item) => item.metric))]) {
             const all = storage.metricObservations.list({ source: "github", subjectExternalId, metric })
@@ -965,14 +997,17 @@ export class WorkspaceService {
             reason: null,
             checkedAt: observations[0]?.provenance.collectedAt ?? new Date().toISOString(),
           });
+          if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, quantitativeSourceStatus({ ...input.runSource, itemCount: observations.length, artifactIds: [...series.map((item) => item.id), ...observations.map((item) => item.id)] }));
         });
         return { observations, series, events };
       } finally {
         storage.close();
       }
     } catch (error) {
+      if (error instanceof QuantitativePersistenceError) throw error;
       const storage = this.openCanonical();
       try {
+        commitQuantitative(storage, () => {
         storage.quantitativeSourceStatuses.save({
           id: `github:${subjectExternalId}`,
           source: "github",
@@ -981,6 +1016,8 @@ export class WorkspaceService {
           itemCount: 0,
           reason: error instanceof Error ? error.message : String(error),
           checkedAt: new Date().toISOString(),
+        });
+        if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, failedQuantitativeSourceStatus(input.runSource.id, input.runSource.source, error, input.runSource.startedAt));
         });
       } finally {
         storage.close();
@@ -998,6 +1035,7 @@ export class WorkspaceService {
     category?: string;
     property?: "web" | "news" | "images" | "youtube" | "shopping";
     transport?: GoogleTrendsTransport;
+    runSource?: RunSourceCheckpoint;
   }): Promise<{ context: GoogleTrendsNormalizationContext; observations: readonly GoogleTrendsMetricObservation[]; series: GoogleTrendsSeries; event: TrendEvent }> {
     if (!input.subject.trim()) throw new Error("Google Trends subject must not be empty");
     if (!/^(?:[A-Za-z]{2}|WORLDWIDE)$/.test(input.geography)) throw new Error("Google Trends geography must be an ISO-3166 alpha-2 code or WORLDWIDE");
@@ -1043,22 +1081,27 @@ export class WorkspaceService {
       const event = classifySearchMomentum(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: result.provenance.retrievedAt });
       const storage = this.openCanonical();
       try {
-        storage.transaction(() => {
+        commitQuantitative(storage, () => {
           storage.normalizationContexts.save(context);
           for (const observation of observations) storage.metricObservations.save(observation);
           storage.trendSeries.save(built.series);
           storage.trendEvents.append(event);
           storage.quantitativeSourceStatuses.save({ id: statusId, source: "google_trends", subjectExternalId: subjectId, status: "success", itemCount: observations.length, reason: null, checkedAt: result.provenance.retrievedAt, geography: context.geography, from: context.window.startAt, to: context.window.endAt, provenance: result.provenance });
+          if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, quantitativeSourceStatus({ ...input.runSource, itemCount: observations.length, artifactIds: [built.series.id, ...observations.map((item) => item.id)] }));
         });
       } finally {
         storage.close();
       }
       return { context, observations, series: built.series, event };
     } catch (error) {
+      if (error instanceof QuantitativePersistenceError) throw error;
       const status = error instanceof GoogleTrendsSourceError ? error.status : "response_drift";
       const storage = this.openCanonical();
       try {
+        commitQuantitative(storage, () => {
         storage.quantitativeSourceStatuses.save({ id: statusId, source: "google_trends", subjectExternalId: input.subject.trim(), status, itemCount: 0, reason: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString(), geography: input.geography, from: input.from, to: input.to, retryAt: error instanceof GoogleTrendsSourceError ? error.retryAt : null });
+        if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, failedQuantitativeSourceStatus(input.runSource.id, input.runSource.source, error, input.runSource.startedAt));
+        });
       } finally {
         storage.close();
       }
@@ -1072,6 +1115,7 @@ export class WorkspaceService {
     from: string;
     to: string;
     connector?: PackageDownloadsConnector;
+    runSource?: RunSourceCheckpoint;
   }): Promise<{ observations: PackageDownloadObservation[]; series: PackageDownloadSeries; event: TrendEvent | null }> {
     const canonicalName = canonicalizePackageName(input.ecosystem, input.packageName);
     const connector = input.connector ?? (input.ecosystem === "npm" ? createNpmDownloadsConnector() : createPyPiDownloadsConnector());
@@ -1117,11 +1161,12 @@ export class WorkspaceService {
         ));
         const currentIds = new Set(observations.map((item) => item.id));
         const built = builtSeries.find((candidate) => candidate.observations.some((item) => currentIds.has(item.id)))!;
-        const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: collected.provenance.retrievedAt });
+        const detectedAt = built.observations.map((item) => item.provenance.collectedAt).sort().at(-1) ?? collected.provenance.retrievedAt;
+        const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt });
         const previousSeries = storage.trendSeries.list({ ecosystem: input.ecosystem, packageName: subject.canonicalName })
           .filter((item): item is PackageDownloadSeries => item.source === "npm_registry" || item.source === "pypi");
         const nextSeriesIds = new Set(builtSeries.map((item) => item.series.id));
-        storage.transaction(() => {
+        commitQuantitative(storage, () => {
           for (const observation of observations) storage.metricObservations.save(observation);
           for (const stale of previousSeries.filter((item) => !nextSeriesIds.has(item.id))) {
             storage.trendEvents.deleteBySeries(stale.id);
@@ -1130,16 +1175,21 @@ export class WorkspaceService {
           for (const candidate of builtSeries) storage.trendSeries.save(candidate.series);
           if (event) storage.trendEvents.append(event);
           storage.quantitativeSourceStatuses.save({ id: statusId, source: input.ecosystem === "npm" ? "npm_registry" : "pypi", subjectExternalId: subject.externalId, status: "success", itemCount: observations.length, reason: null, checkedAt: collected.provenance.retrievedAt, ecosystem: input.ecosystem, packageName: subject.canonicalName, from: collected.from, to: collected.to, provenance: collected.provenance });
+          if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, quantitativeSourceStatus({ ...input.runSource, itemCount: observations.length, artifactIds: [built.series.id, ...built.series.observationIds] }));
         });
         return { observations, series: built.series, event };
       } finally {
         storage.close();
       }
     } catch (error) {
+      if (error instanceof QuantitativePersistenceError) throw error;
       const status = error instanceof PackageDownloadsSourceError ? error.status : "response_drift";
       const storage = this.openCanonical();
       try {
+        commitQuantitative(storage, () => {
         storage.quantitativeSourceStatuses.save({ id: statusId, source: input.ecosystem === "npm" ? "npm_registry" : "pypi", subjectExternalId: `${input.ecosystem}:${canonicalName}`, status, itemCount: 0, reason: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString(), ecosystem: input.ecosystem, packageName: canonicalName, from: input.from, to: input.to, retryAt: error instanceof PackageDownloadsSourceError ? error.retryAt : null });
+        if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, failedQuantitativeSourceStatus(input.runSource.id, input.runSource.source, error, input.runSource.startedAt));
+        });
       } finally {
         storage.close();
       }
@@ -1168,11 +1218,11 @@ export class WorkspaceService {
     }
   }
 
-  async runMultiLaneResearch(briefRef: string, options: { fixtureSet?: "representative" } = {}): Promise<StoredMultiLaneReportRecord> {
+  async runMultiLaneResearch(briefRef: string, options: { fixtureSet?: "representative" | "google-throttled" | "github-unauthorized" | "npm-unavailable"; execution?: ResearchRunExecution; runId?: ResearchRunId } = {}): Promise<StoredMultiLaneReportRecord> {
     const brief = await this.getBrief(briefRef);
     if (!brief) throw new Error(`Brief not found: ${briefRef}`);
-    const stored = await this.runResearch(briefRef);
-    const fixture = options.fixtureSet === "representative";
+    const stored = await this.runResearch(briefRef, { execution: options.execution, runId: options.runId });
+    const fixture = options.fixtureSet !== undefined;
     const plan = brief.queryPlan?.quantitative;
     if (!plan) throw new Error(`Brief has no quantitative research plan: ${briefRef}`);
 
@@ -1207,6 +1257,10 @@ export class WorkspaceService {
         payload: { runId: stored.run.id, reason: "independence_recalculation", corrective: true },
       });
     } finally { canonicalAdmission.close(); }
+    const previousStorage = this.openCanonical();
+    const previousReport = previousStorage.multiLaneReports.getByRun(stored.run.id);
+    const previousFollowUps = previousStorage.followUpProposals.listByRun(stored.run.id);
+    previousStorage.close();
     const claims: ResearchClaim[] = stored.evidence.map((evidence) => {
       const lane: ResearchLane = evidence.supportsClaim === "wtp" ? "commercial_intent" : evidence.supportsClaim === "disconfirming" ? "contradictory_evidence" : "qualitative_demand";
       return buildResearchClaim({
@@ -1219,76 +1273,110 @@ export class WorkspaceService {
         limitations: [],
       });
     });
-    const quantitativeSeries: TrendSeries[] = [];
-    const quantitativeObservations: MetricObservation[] = [];
+    claims.push(...(previousReport?.claims.filter((claim) => !claim.evidenceRefs.some((ref) => ref.kind === "text_quote")) ?? []));
+    const quantitativeSeries: TrendSeries[] = [...(previousReport?.seriesSnapshots ?? [])];
+    const quantitativeObservations: MetricObservation[] = [...(previousReport?.observationSnapshots ?? [])];
     const githubStarObservations: Array<{ repository: string; observation: GitHubMetricObservation }> = [];
-    const followUps: FollowUpHuntingTaskProposal[] = [];
+    const followUps: FollowUpHuntingTaskProposal[] = [...previousFollowUps];
+    const sourceStatuses = new Map((stored.sourceStatuses ?? []).map((status) => [status.id, status]));
+    const previousArtifactIds = new Set<string>([...(previousReport?.seriesSnapshots.map((item) => item.id) ?? []), ...(previousReport?.observationSnapshots.map((item) => item.id) ?? [])]);
+    const hasReportedCheckpoint = (requestKey: string): boolean => {
+      const status = sourceStatuses.get(requestKey);
+      return status?.status === "success" && (status.artifactIds?.length ?? 0) > 0 && status.artifactIds!.every((id) => previousArtifactIds.has(id));
+    };
+    const addObservations = (items: readonly MetricObservation[]): void => { for (const item of items) if (!quantitativeObservations.some((existing) => existing.id === item.id)) quantitativeObservations.push(item); };
+    const addSeries = (series: TrendSeries): void => {
+      if (!quantitativeSeries.some((item) => item.id === series.id)) quantitativeSeries.push(series);
+      const snapshotStorage = this.openCanonical();
+      try { addObservations(series.observationIds.flatMap((id) => snapshotStorage.metricObservations.get(id) ?? [])); }
+      finally { snapshotStorage.close(); }
+    };
+    const addClaim = (claim: ResearchClaim): void => { if (!claims.some((item) => item.id === claim.id)) claims.push(claim); };
+    const addFollowUp = (proposal: FollowUpHuntingTaskProposal): void => { if (!followUps.some((item) => item.id === proposal.id)) followUps.push(proposal); };
 
-    for (const request of plan.googleTrends ?? []) {
+    for (const [index, request] of (plan.googleTrends ?? []).entries()) {
+      const requestKey = `quant:google:${index}`;
+      if (previousReport && hasReportedCheckpoint(requestKey)) continue;
+      const startedAt = new Date().toISOString();
+      try {
       const transport: GoogleTrendsTransport | undefined = fixture ? {
         async query(query) {
+          if (options.fixtureSet === "google-throttled") throw new GoogleTrendsSourceError("throttled", "Recorded Google Trends throttling", "2026-01-11T00:00:00.000Z");
           const values = [10, 15, 22, 35, 55, 80];
           const start = Date.parse(query.from);
           const step = query.granularity === "week" ? 7 * 86_400_000 : 86_400_000;
           return { payload: { rows: values.map((value, index) => ({ time: new Date(start + index * step).toISOString(), value, partial: false })), comparisonSet: [query.subject], anchor: null }, provenance: { transport: "representative-fixture", transportVersion: "1", authorizedInterface: "recorded_fixture", sourceRef: "fixture://multi-lane/google", retrievedAt: query.to } };
         },
       } : undefined;
-      const result = await this.collectGoogleTrends({ ...request, transport });
-      quantitativeSeries.push(result.series);
-      quantitativeObservations.push(...result.observations);
-      claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "trend_momentum", statement: `${request.subject}: ${result.event.kind}`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Search momentum is not validated demand"] }));
-      if (["spike", "sustained_growth"].includes(result.event.kind)) followUps.push(proposeFollowUpHuntingTask({ triggerEventId: result.event.id, triggerSeriesId: result.series.id, triggerKind: result.event.kind as "spike" | "sustained_growth", subject: request.subject }));
+      const result = await this.collectGoogleTrends({ ...request, transport, runSource: { runId: stored.run.id, id: requestKey, source: "google_trends", startedAt } });
+      addSeries(result.series); addObservations(result.observations);
+      addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "trend_momentum", statement: `${request.subject}: ${result.event.kind}`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Search momentum is not validated demand"] }));
+      if (["spike", "sustained_growth"].includes(result.event.kind)) addFollowUp(proposeFollowUpHuntingTask({ triggerEventId: result.event.id, triggerSeriesId: result.series.id, triggerKind: result.event.kind as "spike" | "sustained_growth", subject: request.subject }));
+      sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: "google_trends", itemCount: result.observations.length, startedAt, artifactIds: [result.series.id, ...result.observations.map((item) => item.id)] }));
+      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "google_trends", error, startedAt)); }
     }
-    for (const request of plan.github ?? []) {
+    for (const [index, request] of (plan.github ?? []).entries()) {
+      const requestKey = `quant:github:${index}`;
+      if (previousReport && hasReportedCheckpoint(requestKey)) continue;
+      const startedAt = new Date().toISOString();
+      try {
       const connector: QuantitativeConnector | undefined = fixture ? {
-        source: "github", async healthcheck() { return { ok: true }; }, async collect() {
+        source: "github", async healthcheck() { return options.fixtureSet === "github-unauthorized" ? { ok: false, message: "401 unauthorized GitHub fixture" } : { ok: true }; }, async collect() {
           const observedAt = "2026-01-10T00:00:00.000Z";
           const provenance = { url: `https://api.github.com/repos/${request.repository}`, endpoint: "/repos/{owner}/{repo}", apiVersion: "2022-11-28", retrievedAt: observedAt };
           return [["github.repository.stars", 120], ["github.repository.forks", 18], ["github.repository.open_issues", 7], ["github.issue.opened", 4], ["github.issue.closed", 3], ["github.repository.contributors", 12]].map(([metric, value]) => ({ id: `metric_fixture_${String(metric).replace(/\W/g, "_")}`, subject: `github:${request.repository}`, source: "github", metric: String(metric), geography: null, observedAt, rawValue: Number(value), normalizedValue: Number(value), unit: "count" as const, collectionMethod: "authorized_public_api" as const, provenance }));
         },
       } : undefined;
-      const result = await this.collectGithubMetrics({ subject: request.repository, since: request.since, connector });
-      quantitativeObservations.push(...result.observations);
+      const result = await this.collectGithubMetrics({ subject: request.repository, since: request.since, connector, runSource: { runId: stored.run.id, id: requestKey, source: "github", startedAt } });
+      addObservations(result.observations);
       const starObservation = result.observations.find((item): item is GitHubMetricObservation => item.source === "github" && item.metric === "stars");
       if (starObservation) githubStarObservations.push({ repository: request.repository, observation: starObservation });
       for (const series of result.series) {
-        quantitativeSeries.push(series);
-        claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${series.id}`, lane: "supply_competition", statement: `${request.repository} ${series.metric}: ${series.observationIds.length} observations`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: series.id, observationIds: series.observationIds }], independentSourceGroupIds: [], limitations: ["GitHub popularity is not validated demand"] }));
+        addSeries(series);
+        addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${series.id}`, lane: "supply_competition", statement: `${request.repository} ${series.metric}: ${series.observationIds.length} observations`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: series.id, observationIds: series.observationIds }], independentSourceGroupIds: [], limitations: ["GitHub popularity is not validated demand"] }));
       }
+      sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: "github", itemCount: result.observations.length, startedAt, artifactIds: [...result.series.map((item) => item.id), ...result.observations.map((item) => item.id)] }));
+      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "github", error, startedAt)); }
     }
     const rankingUniverse = githubStarObservations.map((item) => item.repository).sort();
     for (const [index, item] of [...githubStarObservations].sort((a, b) => b.observation.normalizedValue - a.observation.normalizedValue || a.repository.localeCompare(b.repository)).entries()) {
       const rank = index + 1;
       const observation = createGitHubMetricObservation({
         id: asId(`metric_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`),
-        subject: { kind: "repository", externalId: item.repository.toLowerCase(), url: `https://github.com/${item.repository}` },
+        subject: { kind: "repository", externalId: `${item.repository.toLowerCase()}#brief:${stored.run.id}`, url: `https://github.com/${item.repository}` },
         metric: "trending_rank", geography: null, observedAt: item.observation.observedAt, rawValue: rank, normalizedValue: rank,
         provenance: { collector: "idea-finder-github-brief-ranking", collectorVersion: "1", interface: "github_rest_api", sourceRef: item.observation.provenance.sourceRef, collectedAt: item.observation.provenance.collectedAt },
       });
       const series = buildTrendSeries(asId(`trend_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`), [observation]).series;
       const rankingStorage = this.openCanonical();
       try { rankingStorage.transaction(() => { rankingStorage.metricObservations.save(observation); rankingStorage.trendSeries.save(series); }); } finally { rankingStorage.close(); }
-      quantitativeObservations.push(observation); quantitativeSeries.push(series);
-      claims.push(buildResearchClaim({
+      addObservations([observation]); addSeries(series);
+      addClaim(buildResearchClaim({
         id: `claim_${stored.run.id}_${series.id}_ranking`, lane: "supply_competition",
         statement: `${item.repository} star rank: ${rank} of ${rankingUniverse.length} in Brief comparison universe [${rankingUniverse.join(", ")}]`,
         status: "unvalidated", evidenceRefs: [{ kind: "ranking_snapshot", observationId: observation.id, sourceUrl: observation.provenance.sourceRef }],
         independentSourceGroupIds: [], limitations: ["Brief-relative star ranking is supply evidence, not validated demand"],
       }));
     }
-    for (const request of plan.packages ?? []) {
+    for (const [index, request] of (plan.packages ?? []).entries()) {
+      const requestKey = `quant:${request.ecosystem}:${index}`;
+      if (previousReport && hasReportedCheckpoint(requestKey)) continue;
+      const startedAt = new Date().toISOString();
+      try {
       const connector: PackageDownloadsConnector | undefined = fixture ? {
         ecosystem: request.ecosystem, async collect(query) {
+          if (options.fixtureSet === "npm-unavailable" && request.ecosystem === "npm") throw new PackageDownloadsSourceError("unavailable_history", "Recorded npm unavailable history");
           const start = Date.parse(`${query.from}T00:00:00.000Z`); const end = Date.parse(`${query.to}T00:00:00.000Z`);
           const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: `fixture://multi-lane/${request.ecosystem}`, retrievedAt: "2026-01-10T00:00:00.000Z", caveat: "Recorded representative fixture" };
           const days = Array.from({ length: Math.floor((end - start) / 86_400_000) + 1 }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
           return { ecosystem: request.ecosystem, package: query.package, from: query.from, to: query.to, provenance, buckets: days.map((day) => ({ id: `fixture_${request.ecosystem}_${day}`, ecosystem: request.ecosystem, package: query.package, subject: `${request.ecosystem}:${query.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })) };
         },
       } : undefined;
-      const result = await this.collectPackageDownloads({ ecosystem: request.ecosystem, packageName: request.package, from: request.from, to: request.to, connector });
-      quantitativeSeries.push(result.series);
-      quantitativeObservations.push(...result.observations);
-      claims.push(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "supply_competition", statement: `${request.ecosystem}:${request.package} download momentum`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Download momentum is not validated demand", ...(request.ecosystem === "pypi" ? ["pypistats is a third-party public API"] : [])] }));
+      const result = await this.collectPackageDownloads({ ecosystem: request.ecosystem, packageName: request.package, from: request.from, to: request.to, connector, runSource: { runId: stored.run.id, id: requestKey, source: request.ecosystem, startedAt } });
+      addSeries(result.series); addObservations(result.observations);
+      addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "supply_competition", statement: `${request.ecosystem}:${request.package} download momentum`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Download momentum is not validated demand", ...(request.ecosystem === "pypi" ? ["pypistats is a third-party public API"] : [])] }));
+      sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: request.ecosystem, itemCount: result.observations.length, startedAt, artifactIds: [result.series.id, ...result.series.observationIds] }));
+      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, request.ecosystem, error, startedAt)); }
     }
 
     const candidateFor = (kind: string, selected: ResearchClaim[], series: TrendSeries[]): MultiLaneCandidate => evaluateMultiLaneCandidate({ id: `candidate_${stored.run.id}_${kind}`, subject: brief.title, claims: selected, qualitativeEvidenceItemIds: [], quantitativeSeriesIds: series.map((item) => item.id), independentQualitativeSourceGroupIds: [] });
@@ -1307,11 +1395,20 @@ export class WorkspaceService {
     const canonical = this.openCanonical();
     try {
       canonical.transaction(() => {
-        for (const proposal of followUps) canonical.followUpProposals.save(stored.run.id, proposal);
+        for (const status of sourceStatuses.values()) canonical.sourceStatuses.save(stored.run.id, status);
+        const incompleteStatuses = [...sourceStatuses.values()].filter((status) => status.status !== "success");
+        canonical.researchRuns.save({ ...stored.run, status: incompleteStatuses.length > 0 ? "partial" : "completed", completedAt: new Date().toISOString(), errorMessage: incompleteStatuses.length > 0 ? incompleteStatuses.map((status) => `${status.source}: ${status.reason ?? status.reasonCode}`).join("; ") : null });
+        for (const proposal of followUps) if (!canonical.followUpProposals.get(stored.run.id, proposal.id)) canonical.followUpProposals.save(stored.run.id, proposal);
         canonical.multiLaneReports.save(report);
       });
     } finally { canonical.close(); }
     return report;
+  }
+
+  listResearchSourceStatuses(runId: ResearchRunId): ResearchSourceStatus[] {
+    const storage = this.openCanonical();
+    try { return storage.sourceStatuses.listByRun(runId) as ResearchSourceStatus[]; }
+    finally { storage.close(); }
   }
 
   inspectMultiLaneResearch(runId: ResearchRunId, claimId?: string): { report: StoredMultiLaneReportRecord; claims: ResearchClaim[]; details: unknown[]; independence: unknown[]; proposals: FollowUpHuntingTaskProposal[] } {

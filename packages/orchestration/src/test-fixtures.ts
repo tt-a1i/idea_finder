@@ -165,6 +165,7 @@ export function createFixtureHarvest(storage: LocalStorage): HarvestPipeline {
         ],
         chunks: [chunkA, chunkB, chunkC],
         signals: [signalA, signalB, signalC],
+        sourceExecutions: [],
       };
     },
   };

@@ -23,10 +23,43 @@ function tempDataDir(): string {
 }
 
 describe("@idea-finder/orchestration", () => {
+  it("marks mixed source outcomes partial and retries only failed requests to recovery", async () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      let attempt = 0;
+      const skippedKeys: string[][] = [];
+      const status = (id: string, source: string, value: "success" | "throttled", reason: string | null) => ({
+        id, requestKey: id, source, status: value, itemCount: value === "success" ? 1 : 0,
+        reasonCode: value === "success" ? "none" as const : "throttled" as const, reason,
+        startedAt: "2026-07-11T00:00:00.000Z", completedAt: "2026-07-11T00:00:01.000Z", retryAt: value === "throttled" ? "2026-07-11T00:01:00.000Z" : null,
+      });
+      const orchestrator = createResearchRunOrchestrator({
+        stores: storage,
+        harvest: { async runHarvest(_runId, _plan, options) {
+          attempt += 1;
+          skippedKeys.push([...options?.completedRequestKeys ?? []]);
+          return { documents: [], chunks: [], signals: [], sourceExecutions: attempt === 1
+            ? [status("search:0:hn", "hn", "success", null), status("search:1:v2ex", "v2ex", "throttled", "429 rate limited")]
+            : [status("search:1:v2ex", "v2ex", "success", null)] };
+        } },
+        intelligence: { async run() {} },
+      });
+      const run = orchestrator.createRun({ huntingTaskId: asId("task-partial"), configHash: "cfg_partial" });
+      const partial = await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
+      expect(partial).toMatchObject({ status: "partial", errorMessage: "429 rate limited" });
+      expect(storage.sourceStatuses.listByRun(run.id)).toEqual(expect.arrayContaining([expect.objectContaining({ id: "search:0:hn", status: "success" }), expect.objectContaining({ id: "search:1:v2ex", status: "throttled" })]));
+      const recovered = await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
+      expect(recovered).toMatchObject({ status: "completed", errorMessage: null });
+      expect(skippedKeys[1]).toEqual(["search:0:hn"]);
+      expect(storage.sourceStatuses.listByRun(run.id).find((item) => item.id === "search:1:v2ex")).toMatchObject({ status: "success" });
+      storage.close();
+    } finally { rmSync(dataDir, { recursive: true, force: true }); }
+  });
   it("wires harvest and intelligence scaffolds", async () => {
     const plan = testQueryPlan();
     const engine = createOrchestrationEngine({
-      harvest: { runHarvest: async () => ({ documents: [], chunks: [], signals: [] }) },
+      harvest: { runHarvest: async () => ({ documents: [], chunks: [], signals: [], sourceExecutions: [] }) },
       intelligence: { run: async () => undefined },
     });
     await expect(

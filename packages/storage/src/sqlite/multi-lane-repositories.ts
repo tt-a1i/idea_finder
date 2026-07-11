@@ -39,7 +39,7 @@ function requireRun(db: DatabaseSync, runId: string): ResearchRun {
 }
 
 export function createMultiLaneReportRepository(db: DatabaseSync): MultiLaneReportRepository {
-  const insert = db.prepare("INSERT INTO multi_lane_reports (run_id, brief_id, payload_json) VALUES (?, ?, ?) ON CONFLICT DO NOTHING");
+  const insert = db.prepare("INSERT INTO multi_lane_reports (run_id, brief_id, payload_json) VALUES (?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET brief_id=excluded.brief_id, payload_json=excluded.payload_json");
   const get = db.prepare("SELECT payload_json FROM multi_lane_reports WHERE run_id = ?");
   const insertClaim = db.prepare("INSERT OR IGNORE INTO multi_lane_report_claims (run_id, claim_id) VALUES (?, ?)");
   const claimRuns = db.prepare("SELECT run_id FROM multi_lane_report_claims WHERE claim_id = ? ORDER BY run_id");

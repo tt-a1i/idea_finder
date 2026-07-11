@@ -39,6 +39,9 @@ npm run cli -- run invoicing --resume run_123
 # Demonstration fixture data is opt-in only
 npm run cli -- run invoicing --fixture
 
+# Deterministic source-outcome fixtures (test/support diagnostics)
+npm run cli -- run invoicing --fixture --fixture-source-outcome throttled
+
 # Signal inbox summary and opportunity library
 npm run cli -- inbox --brief invoicing
 npm run cli -- library --brief invoicing
@@ -76,6 +79,10 @@ Machine mode never depends on human-readable lines. Stable failure categories an
 exit codes are: `usage` (2), `validation` (3), `missing-resource` (4), `policy`
 (5), `partial-result` (6), and `internal` (7). Success exits 0. Structured errors
 contain `category`, `code`, `message`, and nullable `details`.
+Commands that retain useful results while a required source is missing return
+status `partial`, exit 6, and name every incomplete source in
+`incompleteness.reasons`. A successful zero-result query remains `success` with
+`itemCount: 0` and `reasonCode: zero_results`; it is not reported as unavailable.
 
 ## Orchestration mode
 
@@ -97,6 +104,14 @@ closed before the migration marker is written. After migration, JSON is not read
 or written as runtime state. Calibration events are append-only, while validation
 experiments, agent tasks, monitor schedules, and monitor comparison metadata use
 the same canonical SQLite database.
+
+Harvest execution is checkpointed per source request. Outcomes are one of
+`success`, `failure`, `skipped`, `unauthorized`, `throttled`, or `unavailable`,
+with a structured reason and optional retry time. Successful source artifacts
+are persisted before later sources run. A mixed run continues through
+intelligence and Library inspection as `partial`, while its human summary keeps
+conclusions conditional. `run --retry <runId>` re-executes only non-successful
+source requests and preserves the IDs of already successful artifacts.
 
 GitHub quantitative collection is a separate evidence lane:
 
@@ -162,6 +177,7 @@ idea-finder brief create agent-demand --title "Agent demand" \
   --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool \
   --from 2026-01-01 --to 2026-01-10 --json
 idea-finder research run agent-demand --fixture-set representative --json
+idea-finder research run agent-demand --retry run_123 --json
 idea-finder research inspect <runId> --json
 idea-finder research follow-up <runId> --proposal <id> --create agent-demand-followup --json
 ```
@@ -171,6 +187,12 @@ to stored quote, observation-series, ranking, or source-URL references. Exact
 duplicate text is grouped before corroboration gates are evaluated.
 Trend/star/ranking/download-only candidates remain visibly `unvalidated`;
 trend anomalies only propose follow-up research and never create an Opportunity.
+Qualitative and quantitative requests share one run-scoped source-outcome
+ledger. If Google Trends, GitHub, npm, or PyPI is unavailable, `research run`
+still persists a partial report containing every completed lane; both `run` and
+`inspect` return exit 6 and name incomplete lanes. Retrying the same run skips
+successful requests, collects missing lanes, and updates the report without
+duplicating persisted snapshots.
 
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an

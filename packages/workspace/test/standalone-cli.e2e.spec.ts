@@ -43,6 +43,16 @@ async function invoke(executable: string, args: readonly string[], cwd: string):
   }
 }
 
+async function invokeHuman(executable: string, args: readonly string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    const result = await exec(executable, [...args], { cwd });
+    return { code: 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+  } catch (error) {
+    const failure = error as Error & { code: number; stdout: string; stderr: string };
+    return { code: failure.code, stdout: failure.stdout.trim(), stderr: failure.stderr.trim() };
+  }
+}
+
 describe("installed standalone CLI", () => {
   let consumer: string;
   let executable: string;
@@ -136,7 +146,7 @@ describe("installed standalone CLI", () => {
     expect((googleInspected.envelope.data as { observations: unknown[] }).observations).toHaveLength(6);
     const googleThrottled = await invoke(executable, ["trends", "collect", "google", "blocked term", "--geo", "US", "--from", "2026-01-01T00:00:00Z", "--to", "2026-01-10T00:00:00Z", "--fixture", "--fixture-failure", "throttled", "--workspace", workspace, "--json"], consumer);
     expect(googleThrottled.code).toBe(CLI_EXIT_CODES.partialResult);
-    expect(googleThrottled.envelope).toMatchObject({ errors: [{ code: "google_trends.throttled" }], data: { retryAt: "2026-01-11T00:00:00.000Z", sourceHealth: [expect.objectContaining({ status: "throttled", itemCount: 0 })] } });
+    expect(googleThrottled.envelope).toMatchObject({ status: "partial", incompleteness: { incomplete: true, reasons: [expect.stringContaining("throttled")] }, errors: [{ code: "google_trends.throttled" }], data: { retryAt: "2026-01-11T00:00:00.000Z", sourceHealth: [expect.objectContaining({ status: "throttled", itemCount: 0 })] } });
     for (const ecosystem of ["npm", "pypi"] as const) {
       const packageCollected = await invoke(executable, ["trends", "collect", ecosystem, "requests", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--workspace", workspace, "--json"], consumer);
       expectSuccess(packageCollected, "trends collect");
@@ -300,6 +310,21 @@ describe("installed standalone CLI", () => {
     expect(followed.envelope).toMatchObject({ data: { brief: { slug: "multi-followup", origin: { kind: "trend_anomaly", parentRunId: runId, trendEventId: proposal.triggerEventId } } } });
     const afterFollowUp = await invoke(executable, ["research", "inspect", runId, "--workspace", multiWorkspace, "--json"], consumer);
     expect(afterFollowUp.envelope).toMatchObject({ data: { proposals: [expect.objectContaining({ status: "created", createdBriefId: "task_multi-followup" })] } });
+
+    const partial = await invoke(executable, ["research", "run", "multi", "--fixture-set", "google-throttled", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(partial.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(partial.envelope).toMatchObject({ status: "partial", data: { runId: expect.any(String), sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "throttled" }), expect.objectContaining({ source: "github", status: "success" })]) }, incompleteness: { incomplete: true, reasons: [expect.stringContaining("google_trends")] } });
+    const partialRunId = (partial.envelope.data as { runId: string }).runId;
+    const partialInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(partialInspect.code).toBe(CLI_EXIT_CODES.partialResult);
+    const retainedClaimIds = (partialInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id);
+    expect(retainedClaimIds.length).toBeGreaterThan(0);
+    const recovered = await invoke(executable, ["research", "run", "multi", "--fixture-set", "representative", "--retry", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(recovered.code).toBe(0);
+    expect(recovered.envelope).toMatchObject({ data: { runId: partialRunId, execution: "retried", sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "success" })]) } });
+    const recoveredInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(recoveredInspect.code).toBe(0);
+    expect((recoveredInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id)).toEqual(expect.arrayContaining(retainedClaimIds));
   });
 
   it("separates new scans from named retry/resume and isolates fixtures", async () => {
@@ -370,6 +395,38 @@ describe("installed standalone CLI", () => {
     expect(fixtureData.execution).toBe("new");
     expect(fixtureData.run.id).not.toBe(firstData.run.id);
     expect(fixtureData.evidence.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces mixed, authorization, throttling, zero results, retry, and recovery through the installed CLI", async () => {
+    expect((await invoke(executable, ["brief", "create", "source-outcomes", "--title", "Source outcomes", "--workspace", workspace, "--json"], consumer)).code).toBe(0);
+    const runScenario = (scenario: string, json = true) => invoke(executable, ["run", "source-outcomes", "--fixture", "--fixture-source-outcome", scenario, "--workspace", workspace, ...(json ? ["--json"] : [])], consumer);
+    for (const scenario of ["mixed", "unauthorized", "throttled"] as const) {
+      const result = await runScenario(scenario);
+      expect(result.code).toBe(CLI_EXIT_CODES.partialResult);
+      expect(result.envelope).toMatchObject({
+        status: "partial",
+        data: { run: { status: "partial" }, evidence: expect.any(Array), sourceStatuses: [expect.objectContaining({ status: "success" }), expect.objectContaining({ status: scenario === "mixed" ? "unavailable" : scenario })] },
+        incompleteness: { incomplete: true, reasons: [expect.stringContaining(scenario === "mixed" ? "unavailable" : scenario)] },
+      });
+    }
+    const zero = await runScenario("zero");
+    expect(zero.code).toBe(0);
+    expect(zero.envelope).toMatchObject({ status: "success", data: { run: { status: "completed" }, evidence: [], sourceStatuses: expect.arrayContaining([expect.objectContaining({ status: "success", itemCount: 0, reasonCode: "zero_results" })]) } });
+
+    const throttled = await runScenario("throttled");
+    const partialData = throttled.envelope.data as { run: { id: string }; evidence: Array<{ id: string }>; sourceStatuses: Array<{ status: string; retryAt: string | null }> };
+    expect(partialData.sourceStatuses.find((item) => item.status === "throttled")?.retryAt).toBe("2026-07-11T00:01:00.000Z");
+    const recovered = await invoke(executable, ["run", "source-outcomes", "--fixture", "--retry", partialData.run.id, "--workspace", workspace, "--json"], consumer);
+    expect(recovered.code).toBe(0);
+    const recoveredData = recovered.envelope.data as { execution: string; run: { id: string; status: string }; evidence: Array<{ id: string }>; sourceStatuses: Array<{ status: string }> };
+    expect(recoveredData).toMatchObject({ execution: "retried", run: { id: partialData.run.id, status: "completed" } });
+    expect(recoveredData.sourceStatuses.every((item) => item.status === "success")).toBe(true);
+    expect(recoveredData.evidence.map((item) => item.id)).toEqual(partialData.evidence.map((item) => item.id));
+
+    const human = await invokeHuman(executable, ["run", "source-outcomes", "--fixture", "--fixture-source-outcome", "unauthorized", "--workspace", workspace], consumer);
+    expect(human.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(human.stdout).toContain("incomplete sources: fixture_recoverable=unauthorized");
+    expect(human.stdout).toContain("conclusions remain conditional");
   });
 
   it("restarts from canonical SQLite and inspects admitted and rejected Library results", async () => {

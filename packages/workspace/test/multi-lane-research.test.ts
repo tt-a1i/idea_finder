@@ -61,6 +61,18 @@ describe("multi-lane demand research", () => {
       } };
       await service.collectPackageDownloads({ ecosystem: "npm", packageName: "agent-tool", from: "2026-01-04", to: "2026-01-06", connector });
       expect(service.inspectMultiLaneResearch(report.runId as never).details.filter((detail: any) => detail.ref.kind === "observation_series").every((detail: any) => detail.series && detail.observations.every(Boolean))).toBe(true);
+
+      const partial = await service.runMultiLaneResearch("agent-demand", { fixtureSet: "google-throttled" });
+      const partialStatuses = service.listResearchSourceStatuses(partial.runId as never);
+      expect(partialStatuses).toEqual(expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "throttled", retryAt: "2026-01-11T00:00:00.000Z" }), expect.objectContaining({ source: "github", status: "success" }), expect.objectContaining({ source: "npm", status: "success" })]));
+      expect((await service.getState()).runs.find((item) => item.run.id === partial.runId)?.run.status).toBe("partial");
+      expect(service.inspectMultiLaneResearch(partial.runId as never).claims.length).toBeGreaterThan(0);
+      const retainedIds = partial.observationSnapshots.map((item) => item.id);
+      const recovered = await service.runMultiLaneResearch("agent-demand", { fixtureSet: "representative", execution: "retried", runId: partial.runId as never });
+      expect(service.listResearchSourceStatuses(recovered.runId as never).every((status) => status.status === "success")).toBe(true);
+      expect((await service.getState()).runs.find((item) => item.run.id === recovered.runId)?.run.status).toBe("completed");
+      expect(recovered.observationSnapshots.map((item) => item.id)).toEqual(expect.arrayContaining(retainedIds));
+      expect(new Set(recovered.observationSnapshots.map((item) => item.id)).size).toBe(recovered.observationSnapshots.length);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
