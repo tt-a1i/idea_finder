@@ -158,17 +158,6 @@ function summarizeInbox(signals: readonly RawSignal[]): InboxSignalSummary[] {
     .sort((a, b) => a.signalType.localeCompare(b.signalType));
 }
 
-function mergeMaps<T extends { id: string }>(
-  existing: Readonly<Record<string, T>>,
-  items: readonly T[],
-): Record<string, T> {
-  const next = { ...existing };
-  for (const item of items) {
-    next[item.id] = item;
-  }
-  return next;
-}
-
 /** Legacy-only flat projection; canonical entities remain fully run-scoped in StoredResearchRun arrays. */
 function latestCompatibilityEntityRecord<T extends { readonly id: string }>(
   entities: readonly T[],
@@ -178,24 +167,6 @@ function latestCompatibilityEntityRecord<T extends { readonly id: string }>(
     record[entity.id] = entity;
   }
   return record;
-}
-
-function toEvidenceMap(
-  record: Readonly<Record<string, EvidenceItem>>,
-): ReadonlyMap<EvidenceItem["id"], EvidenceItem> {
-  return new Map(Object.entries(record) as [EvidenceItem["id"], EvidenceItem][]);
-}
-
-function toChunkMap(
-  record: Readonly<Record<string, Chunk>>,
-): ReadonlyMap<Chunk["id"], Chunk> {
-  return new Map(Object.entries(record) as [Chunk["id"], Chunk][]);
-}
-
-function toSignalMap(
-  record: Readonly<Record<string, RawSignal>>,
-): ReadonlyMap<RawSignal["id"], RawSignal> {
-  return new Map(Object.entries(record) as [RawSignal["id"], RawSignal][]);
 }
 
 export class WorkspaceService {
@@ -1238,7 +1209,7 @@ export class WorkspaceService {
     }
   }
 
-  async runMultiLaneResearch(briefRef: string, options: { fixtureSet?: "representative" | "google-throttled" | "github-unauthorized" | "npm-unavailable"; execution?: ResearchRunExecution; runId?: ResearchRunId } = {}): Promise<StoredMultiLaneReportRecord> {
+  async runMultiLaneResearch(briefRef: string, options: { fixtureSet?: "representative" | "google-throttled" | "github-unauthorized" | "npm-unavailable"; execution?: ResearchRunExecution; runId?: ResearchRunId; googleTrendsTransport?: GoogleTrendsTransport } = {}): Promise<StoredMultiLaneReportRecord> {
     const brief = await this.getBrief(briefRef);
     if (!brief) throw new Error(`Brief not found: ${briefRef}`);
     const stored = await this.runResearch(briefRef, { execution: options.execution, runId: options.runId });
@@ -1326,7 +1297,7 @@ export class WorkspaceService {
           const step = query.granularity === "week" ? 7 * 86_400_000 : 86_400_000;
           return { payload: { rows: values.map((value, index) => ({ time: new Date(start + index * step).toISOString(), value, partial: false })), comparisonSet: [query.subject], anchor: null }, provenance: { transport: "representative-fixture", transportVersion: "1", authorizedInterface: "recorded_fixture", sourceRef: "fixture://multi-lane/google", retrievedAt: query.to } };
         },
-      } : undefined;
+      } : options.googleTrendsTransport;
       const result = await this.collectGoogleTrends({ ...request, transport, runSource: { runId: stored.run.id, id: requestKey, source: "google_trends", startedAt } });
       addSeries(result.series); addObservations(result.observations);
       addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "trend_momentum", statement: `${request.subject}: ${result.event.kind}`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Search momentum is not validated demand"] }));
@@ -1611,6 +1582,7 @@ export class WorkspaceService {
   async invokeMonitor(input: {
     briefSlugOrId: string;
     fixtureSet?: "representative" | "google-throttled" | "github-unauthorized" | "npm-unavailable";
+    googleTrendsTransport?: GoogleTrendsTransport;
   }): Promise<{ schedule: MonitorSchedule; run: StoredResearchRun; baselineRunId: ResearchRunId | null; comparison: { id: string; diff: MonitorDiff } | null; sourceStatuses: readonly ResearchSourceStatus[] }> {
     const brief = await this.getBrief(input.briefSlugOrId);
     if (!brief) throw new Error(`Brief not found: ${input.briefSlugOrId}`);
@@ -1620,7 +1592,7 @@ export class WorkspaceService {
     const baselineRunId = schedule.lastComparedRunId;
     const hasQuantitativePlan = Boolean(brief.queryPlan?.quantitative);
     const freshRunId = hasQuantitativePlan
-      ? (await this.runMultiLaneResearch(brief.id, { fixtureSet: input.fixtureSet, execution: "new" })).runId
+      ? (await this.runMultiLaneResearch(brief.id, { fixtureSet: input.fixtureSet, execution: "new", googleTrendsTransport: input.googleTrendsTransport })).runId
       : (await this.runResearch(brief.id, { execution: "new" })).run.id;
     if (freshRunId === baselineRunId) throw new Error("Monitor invocation must create a distinct ResearchRun");
     const state = await this.getState();

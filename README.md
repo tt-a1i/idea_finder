@@ -16,6 +16,8 @@ Local-first, evidence-native personal demand workspace (implementation in progre
 | `npm run dev` | Watch mode compile |
 | `npm run test` | Run Vitest |
 | `npm run lint` | Typecheck + test (Wave 1 gate; no ESLint yet) |
+| `npm run release:gate` | Run the deterministic CLI + Skill release gate |
+| `npm run test:skill-agent` | Run the live Skill evaluation with an authenticated Codex CLI |
 
 ## Package layout
 

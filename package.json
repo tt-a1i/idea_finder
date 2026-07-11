@@ -21,6 +21,7 @@
     "dev": "tsc --build --watch",
     "test": "vitest run",
     "test:live-smoke": "IDEA_FINDER_LIVE_SMOKE=1 vitest run packages/harvest/test/harvest-pipeline.test.ts -t 'live smoke'",
+    "test:skill-agent": "node scripts/run-skill-agent-eval.mjs",
     "typecheck": "tsc --build",
     "release:smoke": "vitest run packages/workspace/test/standalone-cli.e2e.spec.ts packages/workspace/test/idea-finder-skill.eval.spec.ts",
     "release:gate": "npm run typecheck && npm test",

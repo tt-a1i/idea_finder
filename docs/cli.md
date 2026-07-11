@@ -159,9 +159,33 @@ or supply evidence. They are not `RawSignal`/`EvidenceItem` records and cannot b
 themselves satisfy Library admission or promotion.
 
 Google Trends search momentum requires an explicit subject, geography, and time
-window. Production collection is fail-closed until an approved Google API or
-public-dataset transport is configured; the project does not scrape private
-Google web endpoints. Recorded fixtures are opt-in for deterministic tests:
+window. Google's official API is currently limited-access, so production
+collection uses an explicitly configured authorized HTTP adapter rather than
+scraping private Google web endpoints. Pass its HTTPS URL with
+`--transport-url` or `IDEA_FINDER_GOOGLE_TRENDS_ENDPOINT`; if the adapter needs
+a bearer credential, place it in `IDEA_FINDER_GOOGLE_TRENDS_TOKEN` (never in the
+URL). HTTP is accepted only for loopback development adapters.
+
+The CLI POSTs the provider-neutral query JSON to the adapter. The adapter must
+return JSON containing `payload` in the existing `{ rows, comparisonSet,
+anchor }` shape. It may also return `sourceRef`, `retrievedAt`,
+`transportVersion`, and `authorizedInterface` (`authorized_api` or
+`public_dataset`). This boundary can wrap approved Google Trends API alpha
+access or the Google Cloud public dataset without embedding provider credentials
+or an unpublished Google endpoint in idea-finder:
+
+```bash
+export IDEA_FINDER_GOOGLE_TRENDS_ENDPOINT=https://trends-adapter.example/query
+export IDEA_FINDER_GOOGLE_TRENDS_TOKEN='...'
+idea-finder trends collect google "agent coding" --geo US \
+  --from 2026-01-01T00:00:00Z --to 2026-01-10T00:00:00Z --json
+
+# The same configured transport is used by the real multi-lane research path.
+idea-finder research run agent-demand --json
+```
+
+Without an authorized adapter the source remains fail-closed with
+`authorization_required`. Recorded fixtures are opt-in for deterministic tests:
 
 ```bash
 idea-finder trends collect google "agent coding" --geo US \
@@ -276,6 +300,19 @@ demonstration records are never treated as product evidence implicitly.
 
 ```bash
 npm test -- packages/workspace
+npm run release:gate
+
+# Live Agent evaluation: requires an authenticated Codex CLI or OPENAI_API_KEY.
+npm run test:skill-agent
 ```
 
-End-to-end coverage: `packages/workspace/test/workspace-e2e.spec.ts` (fixture + orchestration + CLI smoke).
+The deterministic gate executes Skill contract checks and the standalone CLI in
+isolated workspaces. The live Agent evaluation additionally packs the release,
+installs it into a clean temporary consumer, loads the installed Skill through
+Codex, observes real CLI tool calls, and proves the validation workflow pauses
+without mutating state. It is also available as the manually triggered
+`live-skill-agent-eval` GitHub workflow because model credentials are not exposed
+to ordinary pull-request jobs.
+
+End-to-end coverage includes the workspace vertical slice, installed standalone
+CLI, deterministic Skill contract checks, and the credentialed live Agent eval.

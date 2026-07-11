@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
-  CalibrationEvent,
   Chunk,
   EvidenceItem,
   Opportunity,

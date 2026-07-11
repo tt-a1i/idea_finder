@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { CalibrationEvent, ResearchRunId } from "@idea-finder/core";
+import type { CalibrationEvent } from "@idea-finder/core";
 import type { CalibrationEventRepository } from "../ports/repositories.js";
 
 export function createCalibrationEventRepository(db: DatabaseSync): CalibrationEventRepository {

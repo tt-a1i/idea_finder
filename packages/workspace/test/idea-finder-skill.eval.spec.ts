@@ -1,11 +1,44 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { runSkillWorkflow } from "./support/skill-workflow-harness.js";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const skillRoot = path.join(root, "skills", "idea-finder");
 
 describe("idea-finder companion Skill evaluations", () => {
+  it("loads the Skill and executes a discovery workflow through the real CLI", async () => {
+    const trace = await runSkillWorkflow({
+      skillPath: path.join(skillRoot, "SKILL.md"),
+      prompt: "帮我发现 agent coding 工作流里真实、反复出现的需求。",
+    });
+
+    expect(trace.commands.map((command) => command.command)).toEqual([
+      "workspace diagnostics",
+      "brief create",
+      "research run",
+      "research inspect",
+    ]);
+    expect(trace.commands.every((command) => command.exitCode === 0)).toBe(true);
+    expect(trace.commands.every((command) => command.envelope.contractVersion === "1.0")).toBe(true);
+    expect(trace.response).toContain("Stored evidence:");
+    expect(trace.response).toContain("Inference:");
+    expect(trace.pausedForHumanDecision).toBe(false);
+  });
+
+  it("loads the human-decision boundary and pauses validation before mutation", async () => {
+    const trace = await runSkillWorkflow({
+      skillPath: path.join(skillRoot, "SKILL.md"),
+      prompt: "检查这个 Opportunity，然后帮我设计并记录验证实验。",
+      fixtureContext: "opportunity",
+    });
+
+    expect(trace.commands.map((command) => command.command)).toEqual(["library inspect"]);
+    expect(trace.commands[0]?.exitCode).toBe(0);
+    expect(trace.response).toContain("Human decision required:");
+    expect(trace.pausedForHumanDecision).toBe(true);
+  });
+
   it("has valid concise metadata, UI metadata, and resolvable references", async () => {
     const skill = await readFile(path.join(skillRoot, "SKILL.md"), "utf8");
     expect(skill.split("\n").length).toBeLessThan(500);

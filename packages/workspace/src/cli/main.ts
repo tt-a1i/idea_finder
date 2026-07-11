@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
-import { GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
+import { createAuthorizedHttpGoogleTrendsTransport, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
@@ -11,7 +11,6 @@ import {
   CLI_CONTRACT_VERSION,
   CLI_EXIT_CODES,
   CliFailure,
-  type CliErrorCategory,
   type CliMachineEnvelope,
   type CliStructuredError,
 } from "./contract.js";
@@ -60,16 +59,16 @@ Usage:
   idea-finder validation complete <experimentId> --outcome <validated|invalidated|inconclusive|blocked> --summary <text>
   idea-finder monitor diff --brief <slug> --baseline <runId> --compare <runId>
   idea-finder monitor schedule <brief> --cadence <manual|daily|weekly> [--enabled <true|false>]
-  idea-finder monitor run <brief> [--fixture] [--fixture-set <representative|google-throttled|github-unauthorized|npm-unavailable>]
+  idea-finder monitor run <brief> [--transport-url <https-url>] [--fixture] [--fixture-set <representative|google-throttled|github-unauthorized|npm-unavailable>]
   idea-finder trends collect github <owner/repository> [--since <iso-time>] [--fixture]
-  idea-finder trends collect google <subject> --geo <CC|WORLDWIDE> --from <iso> --to <iso> [--granularity <day|week>] [--fixture] [--fixture-pattern <spike|seasonal|sustained|insufficient>]
+  idea-finder trends collect google <subject> --geo <CC|WORLDWIDE> --from <iso> --to <iso> [--granularity <day|week>] [--transport-url <https-url>] [--fixture] [--fixture-pattern <spike|seasonal|sustained|insufficient>]
   idea-finder trends collect <npm|pypi> <package> --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--fixture]
   idea-finder trends inspect package --ecosystem <npm|pypi> --package <name> [--from <iso>] [--to <iso>]
   idea-finder trends inspect google <subject> [--geo <CC|WORLDWIDE>] [--from <iso>] [--to <iso>]
   idea-finder trends observations [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends series [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends events [--subject <owner/repository>] [--metric <metric>]
-  idea-finder research run <brief> [--fixture-set representative]
+  idea-finder research run <brief> [--transport-url <https-url>] [--fixture-set representative]
   idea-finder research inspect <runId> [--claim <claimId>]
   idea-finder research follow-up <runId> --proposal <id> --create <slug>
   idea-finder export <brief> [--out <path.md>]
@@ -131,6 +130,20 @@ function svc(workspaceDir: string, mode: "fixture" | "orchestration" = "orchestr
   });
 }
 
+function configuredGoogleTrendsTransport(argv: readonly string[]): GoogleTrendsTransport | undefined {
+  const endpoint = flag(argv, "--transport-url") ?? process.env.IDEA_FINDER_GOOGLE_TRENDS_ENDPOINT;
+  if (!endpoint) return undefined;
+  try {
+    return createAuthorizedHttpGoogleTrendsTransport({
+      endpoint,
+      bearerToken: process.env.IDEA_FINDER_GOOGLE_TRENDS_TOKEN,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Google Trends transport configuration is invalid";
+    throw new CliFailure("validation", "google_trends.transport_invalid", message, CLI_EXIT_CODES.validation);
+  }
+}
+
 function commandName(argv: readonly string[]): string {
   const positional = argv.filter((value, index) => {
     if (value.startsWith("--")) return false;
@@ -161,13 +174,13 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "validation complete": { valueFlags: ["--outcome", "--summary"], positionalCount: 3 },
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
   "monitor schedule": { valueFlags: ["--cadence", "--enabled", "--min-cross-source-growth", "--min-strong-pain-growth", "--min-commercial-growth", "--min-cooling-loss"], positionalCount: 3 },
-  "monitor run": { valueFlags: ["--fixture-source-outcome", "--fixture-set"], booleanFlags: ["--fixture"], positionalCount: 3 },
-  "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars", "--geo", "--from", "--to", "--granularity", "--fixture-pattern", "--fixture-failure"], booleanFlags: ["--fixture"], positionalCount: 4 },
+  "monitor run": { valueFlags: ["--fixture-source-outcome", "--fixture-set", "--transport-url"], booleanFlags: ["--fixture"], positionalCount: 3 },
+  "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars", "--geo", "--from", "--to", "--granularity", "--transport-url", "--fixture-pattern", "--fixture-failure"], booleanFlags: ["--fixture"], positionalCount: 4 },
   "trends inspect": { valueFlags: ["--geo", "--from", "--to", "--ecosystem", "--package"], positionalCount: 4 },
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
-  "research run": { valueFlags: ["--fixture-set", "--retry", "--resume"], positionalCount: 3 },
+  "research run": { valueFlags: ["--fixture-set", "--retry", "--resume", "--transport-url"], positionalCount: 3 },
   "research inspect": { valueFlags: ["--claim"], positionalCount: 3 },
   "research follow-up": { valueFlags: ["--proposal", "--create"], positionalCount: 3 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
@@ -404,7 +417,9 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     if (!monitorBrief) throw new Error(`Brief not found: ${briefSlugOrId}`);
     const quantitative = Boolean(monitorBrief.queryPlan?.quantitative);
     const monitorService = fixture && !quantitative ? svc(workspaceDir, "fixture", fixtureSourceScenario) : orchestrationService;
-    const result = await monitorService.invokeMonitor({ briefSlugOrId, fixtureSet: fixtureSet ?? (fixture && quantitative ? "representative" : undefined) });
+    const googleTrendsTransport = configuredGoogleTrendsTransport(rest);
+    if (fixture && googleTrendsTransport) throw new CliFailure("validation", "google_trends.transport_conflict", "Use either --fixture or an authorized Google Trends transport, not both", CLI_EXIT_CODES.validation);
+    const result = await monitorService.invokeMonitor({ briefSlugOrId, fixtureSet: fixtureSet ?? (fixture && quantitative ? "representative" : undefined), googleTrendsTransport });
     const incomplete = result.sourceStatuses.filter((status) => status.status !== "success");
     const reasons = incomplete.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`);
     return { command: "monitor run", data: result, human: `Monitor run ${result.run.run.id}: ${result.comparison ? `${result.comparison.diff.summary.added} added, ${result.comparison.diff.summary.heated} heated, ${result.comparison.diff.summary.cooled} cooled, ${result.comparison.diff.summary.unchanged} unchanged` : "baseline established"}${incomplete.length ? "; partial coverage; cooling is suppressed where inconclusive" : ""}`, incompleteness: reasons.length ? reasons : undefined, exitCode: reasons.length ? CLI_EXIT_CODES.partialResult : undefined };
@@ -455,6 +470,10 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       const pattern = oneOf(flag(rest, "--fixture-pattern") ?? "sustained", ["spike", "seasonal", "sustained", "insufficient"] as const, "fixture-pattern");
       const fixtureFailureRaw = flag(rest, "--fixture-failure");
       const fixtureFailure = fixtureFailureRaw ? oneOf(fixtureFailureRaw, ["throttled", "unavailable", "response_drift"] as const, "fixture-failure") : undefined;
+      const configuredTransport = configuredGoogleTrendsTransport(rest);
+      if (has(rest, "--fixture") && configuredTransport) {
+        throw new CliFailure("validation", "google_trends.transport_conflict", "Use either --fixture or an authorized Google Trends transport, not both", CLI_EXIT_CODES.validation);
+      }
       const fixtureValues = pattern === "spike" ? [10, 11, 9, 80, 15, 12]
         : pattern === "seasonal" ? [10, 50, 20, 10, 50, 20]
           : pattern === "insufficient" ? [10, 12, 14]
@@ -472,7 +491,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       } : undefined;
       const service = svc(workspaceDir);
       try {
-        const result = await service.collectGoogleTrends({ subject, geography, from, to, granularity, transport: fixtureTransport });
+        const result = await service.collectGoogleTrends({ subject, geography, from, to, granularity, transport: fixtureTransport ?? configuredTransport });
         return { command: "trends collect", data: { ...result, sourceHealth: service.inspectGoogleTrends({ subject }).sourceHealth }, human: `Collected ${result.observations.length} Google Trends observations for ${subject}/${geography}` };
       } catch (error) {
         if (error instanceof GoogleTrendsSourceError) {
@@ -533,7 +552,9 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const retryRunId = flag(rest, "--retry"); const resumeRunId = flag(rest, "--resume");
     if (retryRunId && resumeRunId) throw new CliFailure("validation", "research.execution_conflict", "Use only one of --retry or --resume", CLI_EXIT_CODES.validation);
     const execution = retryRunId ? "retried" : resumeRunId ? "resumed" : "new";
-    const report = await svc(workspaceDir).runMultiLaneResearch(brief, { fixtureSet, execution, runId: (retryRunId ?? resumeRunId) as never });
+    const googleTrendsTransport = configuredGoogleTrendsTransport(rest);
+    if (fixtureSet && googleTrendsTransport) throw new CliFailure("validation", "google_trends.transport_conflict", "Use either --fixture-set or an authorized Google Trends transport, not both", CLI_EXIT_CODES.validation);
+    const report = await svc(workspaceDir).runMultiLaneResearch(brief, { fixtureSet, execution, runId: (retryRunId ?? resumeRunId) as never, googleTrendsTransport });
     const sourceStatuses = svc(workspaceDir).listResearchSourceStatuses(report.runId);
     const incomplete = sourceStatuses.filter((status) => status.status !== "success");
     const reasons = incomplete.map((status) => `${status.source} (${status.requestKey}) ${status.status}: ${status.reason ?? status.reasonCode}`);

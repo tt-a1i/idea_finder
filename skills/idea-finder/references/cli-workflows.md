@@ -39,6 +39,21 @@ idea-finder research inspect <runId> --json
 idea-finder research inspect <runId> --claim <claimId> --json
 ```
 
+Google Trends production collection requires an explicitly authorized adapter
+because Google's official API is limited-access. Configure an approved API or
+public-dataset bridge without placing credentials on the command line:
+
+```bash
+export IDEA_FINDER_GOOGLE_TRENDS_ENDPOINT=https://trends-adapter.example/query
+export IDEA_FINDER_GOOGLE_TRENDS_TOKEN='...'
+idea-finder trends collect google "agent coding" --geo US --from 2026-01-01T00:00:00Z --to 2026-01-10T00:00:00Z --json
+idea-finder research run agent-demand --json
+```
+
+The adapter receives the provider-neutral query as JSON and returns a `payload`
+with `rows`, `comparisonSet`, and `anchor`. If no authorized adapter is
+configured, preserve the CLI's fail-closed `authorization_required` result.
+
 For qualitative-only discovery, use the same inspectable research report path:
 
 ```bash
