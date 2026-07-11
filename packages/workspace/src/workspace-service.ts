@@ -1,5 +1,4 @@
 import {
-  admitToLibrary,
   applyCalibration,
   asId,
   completeValidationExperiment as applyValidationCompletion,
@@ -7,6 +6,8 @@ import {
   createValidationExperiment as buildValidationExperiment,
   startValidationExperiment as markValidationExperimentRunning,
 } from "@idea-finder/core";
+import { join } from "node:path";
+import { openLocalStorage, type LocalStorage } from "@idea-finder/storage";
 import type {
   ActorKind,
   CalibrationAction,
@@ -40,6 +41,9 @@ import type {
   HuntingBrief,
   InboxSignalSummary,
   StoredResearchRun,
+  LibraryAdmissionRecord,
+  ResearchSourceStatus,
+  StoredResearchRunConfig,
   WorkspaceState,
 } from "./types.js";
 import type { AgentKind, AgentPlannedEffect } from "@idea-finder/agents";
@@ -77,6 +81,17 @@ function mergeMaps<T extends { id: string }>(
   return next;
 }
 
+/** Legacy-only flat projection; canonical entities remain fully run-scoped in StoredResearchRun arrays. */
+function latestCompatibilityEntityRecord<T extends { readonly id: string }>(
+  entities: readonly T[],
+): Record<string, T> {
+  const record: Record<string, T> = {};
+  for (const entity of entities) {
+    record[entity.id] = entity;
+  }
+  return record;
+}
+
 function toEvidenceMap(
   record: Readonly<Record<string, EvidenceItem>>,
 ): ReadonlyMap<EvidenceItem["id"], EvidenceItem> {
@@ -97,11 +112,13 @@ function toSignalMap(
 
 export class WorkspaceService {
   private readonly store;
+  private readonly paths: WorkspacePaths;
   private readonly runner: ResearchRunner;
   private readonly runFactory = createResearchRunFactory();
   private readonly agentRunner = new AgentTaskRunner();
 
   constructor(options: WorkspaceServiceOptions) {
+    this.paths = options.paths;
     this.store = createWorkspaceStore(options.paths);
     this.runner =
       options.runner ??
@@ -109,6 +126,160 @@ export class WorkspaceService {
         options.runnerMode ?? "orchestration",
         options.paths.root,
       );
+  }
+
+  private openCanonical(): LocalStorage {
+    return openLocalStorage({ dataDir: join(this.paths.root, "pipeline") });
+  }
+
+  private async migrateLegacyBriefs(): Promise<void> {
+    const legacyBriefs = await this.store.listBriefs();
+    if (legacyBriefs.length === 0) return;
+    const storage = this.openCanonical();
+    try {
+      const canonical = storage.huntingBriefs.list() as HuntingBrief[];
+      for (const legacy of legacyBriefs) {
+        const existing = canonical.find((brief) => brief.id === legacy.id || brief.slug === legacy.slug);
+        if (!existing) {
+          storage.huntingBriefs.save(legacy);
+          canonical.push(legacy);
+          continue;
+        }
+        if (JSON.stringify(existing) !== JSON.stringify(legacy)) {
+          throw new Error(`Legacy Brief conflicts with canonical SQLite state: ${legacy.slug}`);
+        }
+      }
+    } finally {
+      storage.close();
+    }
+  }
+
+  private async migrateLegacyResearchState(): Promise<void> {
+    const storage = this.openCanonical();
+    try {
+      const migrationId = "legacy-research-json-v1";
+      if (storage.compatibilityMigrations.get(migrationId)) return;
+      const legacy = await this.store.loadState();
+      const saveLegacyEntities = <T extends { readonly id: string }>(
+        label: string,
+        runId: ResearchRunId,
+        existing: readonly T[],
+        incoming: readonly T[],
+        save: (entity: T) => void,
+      ): void => {
+        const byId = new Map(existing.map((entity) => [entity.id, entity]));
+        for (const entity of incoming) {
+          const current = byId.get(entity.id);
+          if (!current) {
+            save(entity);
+            continue;
+          }
+          if (JSON.stringify(current) !== JSON.stringify(entity)) {
+            throw new Error(`Legacy ${label} conflicts with canonical SQLite state for ${runId}/${entity.id}`);
+          }
+        }
+      };
+      for (const stored of legacy.runs) {
+        const canonicalRun = storage.researchRuns.get(stored.run.id);
+        if (!canonicalRun) storage.researchRuns.save(stored.run);
+        else if (JSON.stringify(canonicalRun) !== JSON.stringify(stored.run)) {
+          throw new Error(`Legacy ResearchRun conflicts with canonical SQLite state: ${stored.run.id}`);
+        }
+        if (!storage.researchRunConfigs.get(stored.run.id)) {
+          storage.researchRunConfigs.save({
+            id: stored.run.id,
+            effectiveConfig: { legacyImported: true, configHash: stored.run.configHash },
+            execution: stored.execution ?? "new",
+          });
+        }
+        saveLegacyEntities("document", stored.run.id, storage.rawDocuments.listByRun(stored.run.id), stored.documents ?? [], (entity) => storage.rawDocuments.save(stored.run.id, entity));
+        saveLegacyEntities("chunk", stored.run.id, storage.chunks.listByRun(stored.run.id), stored.chunks, (entity) => storage.chunks.save(stored.run.id, entity));
+        saveLegacyEntities("signal", stored.run.id, storage.rawSignals.listByRun(stored.run.id), stored.signals, (entity) => storage.rawSignals.save(stored.run.id, entity));
+        saveLegacyEntities("evidence", stored.run.id, storage.evidenceItems.listByRun(stored.run.id), stored.evidence, (entity) => storage.evidenceItems.save(stored.run.id, entity));
+        saveLegacyEntities("draft", stored.run.id, storage.opportunityDrafts.listByRun(stored.run.id), stored.drafts, (entity) => storage.opportunityDrafts.save(stored.run.id, entity));
+        const existingAdmissions = new Set(
+          storage.libraryAdmissionResults.listByRun(stored.run.id).map((result) => result.id),
+        );
+        const rejectedByDraft = new Map(stored.rejected.map((entry) => [entry.draftId, entry]));
+        for (const draft of stored.drafts) {
+          const opportunity = legacy.opportunities[`opp_${draft.id}`];
+          if (opportunity) {
+            const canonicalOpportunity = storage.opportunities.get(stored.run.id, opportunity.id);
+            if (!canonicalOpportunity) storage.opportunities.save(stored.run.id, opportunity);
+            else if (JSON.stringify(canonicalOpportunity) !== JSON.stringify(opportunity)) {
+              throw new Error(`Legacy opportunity conflicts with canonical SQLite state for ${stored.run.id}/${opportunity.id}`);
+            }
+          }
+          if (existingAdmissions.has(draft.id)) continue;
+          const rejection = rejectedByDraft.get(draft.id);
+          storage.libraryAdmissionResults.save(stored.run.id, {
+            id: draft.id,
+            decision: opportunity ? "admitted" : "rejected",
+            opportunityId: opportunity?.id ?? null,
+            issues: rejection?.issues ?? [],
+          });
+        }
+        if (storage.sourceStatuses.listByRun(stored.run.id).length === 0) {
+          storage.sourceStatuses.save(stored.run.id, {
+            id: "legacy-json",
+            source: "legacy-json",
+            status: "success",
+            itemCount: stored.chunks.length,
+            reason: "Imported from legacy workspace JSON; raw documents were not represented there",
+            completedAt: stored.run.completedAt ?? stored.run.startedAt ?? new Date().toISOString(),
+          });
+        }
+      }
+      storage.compatibilityMigrations.save({ id: migrationId, completedAt: new Date().toISOString() });
+    } finally {
+      storage.close();
+    }
+  }
+
+  private canonicalResearchState(): Pick<
+    WorkspaceState,
+    "runs" | "opportunities" | "evidenceById" | "chunksById" | "signalsById"
+  > {
+    const storage = this.openCanonical();
+    try {
+      const runs: StoredResearchRun[] = storage.researchRuns.list().map((run) => {
+        const admissionResults = storage.libraryAdmissionResults.listByRun(run.id) as LibraryAdmissionRecord[];
+        const rejected = admissionResults
+          .filter((result) => result.decision === "rejected")
+          .map((result) => ({
+            draftId: result.id as never,
+            draft: storage.opportunityDrafts.listByRun(run.id).find((draft) => draft.id === result.id)!,
+            issues: [...result.issues],
+          }));
+        const signals = storage.rawSignals.listByRun(run.id);
+        const config = storage.researchRunConfigs.get(run.id) as StoredResearchRunConfig | null;
+        return {
+          execution: config?.execution ?? "new",
+          run,
+          briefId: run.huntingTaskId,
+          documents: storage.rawDocuments.listByRun(run.id),
+          chunks: storage.chunks.listByRun(run.id),
+          signals,
+          evidence: storage.evidenceItems.listByRun(run.id),
+          drafts: storage.opportunityDrafts.listByRun(run.id),
+          opportunities: storage.opportunities.listByRun(run.id),
+          rejected,
+          admissionResults,
+          sourceStatuses: storage.sourceStatuses.listByRun(run.id) as ResearchSourceStatus[],
+          admittedCount: admissionResults.filter((result) => result.decision === "admitted").length,
+          inbox: summarizeInbox(signals),
+        };
+      });
+      return {
+        runs,
+        opportunities: latestCompatibilityEntityRecord(runs.flatMap((stored) => stored.opportunities)),
+        evidenceById: latestCompatibilityEntityRecord(runs.flatMap((stored) => stored.evidence)),
+        chunksById: latestCompatibilityEntityRecord(runs.flatMap((stored) => stored.chunks)),
+        signalsById: latestCompatibilityEntityRecord(runs.flatMap((stored) => stored.signals)),
+      };
+    } finally {
+      storage.close();
+    }
   }
 
   async createBrief(input: {
@@ -131,16 +302,33 @@ export class WorkspaceService {
       createdAt: new Date().toISOString(),
       queryPlan: input.queryPlan,
     };
-    await this.store.saveBrief(brief);
+    await this.migrateLegacyBriefs();
+    const storage = this.openCanonical();
+    try {
+      const conflict = (storage.huntingBriefs.list() as HuntingBrief[]).find(
+        (existing) => existing.id === brief.id || existing.slug === brief.slug,
+      );
+      if (conflict) throw new Error(`Brief already exists: ${input.slug}`);
+      storage.huntingBriefs.save(brief);
+    } finally {
+      storage.close();
+    }
     return brief;
   }
 
   async listBriefs(): Promise<HuntingBrief[]> {
-    return this.store.listBriefs();
+    await this.migrateLegacyBriefs();
+    const storage = this.openCanonical();
+    try {
+      return (storage.huntingBriefs.list() as HuntingBrief[]).sort((a, b) => a.slug.localeCompare(b.slug));
+    } finally {
+      storage.close();
+    }
   }
 
   async getBrief(slugOrId: string): Promise<HuntingBrief | null> {
-    return this.store.getBrief(slugOrId);
+    const briefs = await this.listBriefs();
+    return briefs.find((brief) => brief.slug === slugOrId || brief.id === slugOrId) ?? null;
   }
 
   async runResearch(
@@ -151,10 +339,11 @@ export class WorkspaceService {
       readonly runId?: ResearchRunId;
     },
   ): Promise<StoredResearchRun> {
-    const brief = await this.store.getBrief(slugOrId);
+    const brief = await this.getBrief(slugOrId);
     if (!brief) {
       throw new Error(`Brief not found: ${slugOrId}`);
     }
+    await this.migrateLegacyResearchState();
 
     const runner = options?.runner ?? this.runner;
     const execution = options?.execution ?? "new";
@@ -168,61 +357,71 @@ export class WorkspaceService {
     const output = await runner.run(brief, { runId, taskId: brief.id, execution });
     const run = output.run;
 
-    const evidenceById = new Map(output.evidence.map((e) => [e.id, e]));
-    const chunksById = new Map(output.chunks.map((c) => [c.id, c]));
-    const signalsById = new Map(output.signals.map((s) => [s.id, s]));
+    const storage = this.openCanonical();
+    try {
+      storage.researchRuns.save(run);
+      storage.researchRunConfigs.save(output.config);
+      for (const document of output.documents) storage.rawDocuments.save(run.id, document);
+      for (const chunk of output.chunks) storage.chunks.save(run.id, chunk);
+      for (const signal of output.signals) storage.rawSignals.save(run.id, signal);
+      for (const evidence of output.evidence) storage.evidenceItems.save(run.id, evidence);
+      for (const draft of output.drafts) storage.opportunityDrafts.save(run.id, draft);
+      for (const opportunity of output.opportunities) storage.opportunities.save(run.id, opportunity);
+      for (const result of output.admissionResults) storage.libraryAdmissionResults.save(run.id, result);
+      for (const status of output.sourceStatuses) storage.sourceStatuses.save(run.id, status);
+    } finally {
+      storage.close();
+    }
 
-    const { admitted, rejected } = admitToLibrary(
-      output.drafts,
-      evidenceById,
-      chunksById,
-      signalsById,
-    );
+    const rejected = output.admissionResults
+      .filter((result) => result.decision === "rejected")
+      .map((result) => ({
+        draftId: result.id as never,
+        draft: output.drafts.find((draft) => draft.id === result.id)!,
+        issues: [...result.issues],
+      }));
 
     const completedRun: StoredResearchRun = {
       execution: output.execution,
       run,
       briefId: brief.id,
+      documents: output.documents,
       chunks: output.chunks,
       signals: output.signals,
       evidence: output.evidence,
       drafts: output.drafts,
+      opportunities: output.opportunities,
       rejected,
-      admittedCount: admitted.length,
+      admissionResults: output.admissionResults,
+      sourceStatuses: output.sourceStatuses,
+      admittedCount: output.opportunities.length,
       inbox: summarizeInbox(output.signals),
     };
-
-    const state = await this.store.loadState();
-    const nextOpportunities = { ...state.opportunities };
-    for (const opp of admitted) {
-      nextOpportunities[opp.id] = opp;
-    }
-
-    const nextState: WorkspaceState = {
-      ...state,
-      runs: [...state.runs.filter((stored) => stored.run.id !== run.id), completedRun],
-      opportunities: nextOpportunities,
-      evidenceById: mergeMaps(state.evidenceById, output.evidence),
-      chunksById: mergeMaps(state.chunksById, output.chunks),
-      signalsById: mergeMaps(state.signalsById, output.signals),
-    };
-
-    await this.store.saveState(nextState);
     return completedRun;
   }
 
   async getState(): Promise<WorkspaceState> {
-    return this.store.loadState();
+    await this.migrateLegacyResearchState();
+    const legacy = await this.store.loadState();
+    const canonical = this.canonicalResearchState();
+    const calibrated = Object.fromEntries(
+      Object.entries(legacy.opportunities).filter(([id]) => canonical.opportunities[id] !== undefined),
+    );
+    return {
+      ...legacy,
+      ...canonical,
+      opportunities: { ...canonical.opportunities, ...calibrated },
+    };
   }
 
   async getInboxSummary(briefSlugOrId?: string): Promise<{
     runId: string | null;
     inbox: InboxSignalSummary[];
   }> {
-    const state = await this.store.loadState();
+    const state = await this.getState();
     let runs = [...state.runs];
     if (briefSlugOrId) {
-      const brief = await this.store.getBrief(briefSlugOrId);
+      const brief = await this.getBrief(briefSlugOrId);
       if (!brief) throw new Error(`Brief not found: ${briefSlugOrId}`);
       runs = runs.filter((r) => r.briefId === brief.id);
     }
@@ -234,35 +433,77 @@ export class WorkspaceService {
   }
 
   async listOpportunities(briefSlugOrId?: string): Promise<Opportunity[]> {
-    const state = await this.store.loadState();
+    const entries = await this.listOpportunityEntries(briefSlugOrId);
+    const latestById = new Map<string, Opportunity>();
+    for (const entry of entries) latestById.set(entry.opportunity.id, entry.opportunity);
+    return [...latestById.values()].sort((a, b) => a.demandStatement.localeCompare(b.demandStatement));
+  }
+
+  async listOpportunityEntries(briefSlugOrId?: string): Promise<Array<{
+    runId: ResearchRunId;
+    opportunity: Opportunity;
+  }>> {
+    await this.migrateLegacyResearchState();
     let briefId: HuntingTaskId | null = null;
     if (briefSlugOrId) {
-      const brief = await this.store.getBrief(briefSlugOrId);
+      const brief = await this.getBrief(briefSlugOrId);
       if (!brief) throw new Error(`Brief not found: ${briefSlugOrId}`);
       briefId = brief.id;
     }
 
-    const runOppIds = new Set<string>();
-    if (briefId) {
-      for (const run of state.runs) {
-        if (run.briefId !== briefId) continue;
-        for (const draft of run.drafts) {
-          runOppIds.add(`opp_${draft.id}`);
-        }
-      }
+    const storage = this.openCanonical();
+    try {
+      const runs = briefId === null ? storage.researchRuns.list() : storage.researchRuns.listByTask(briefId);
+      return runs.flatMap((run) => storage.opportunities.listByRun(run.id).map((opportunity) => ({
+        runId: run.id,
+        opportunity,
+      })));
+    } finally {
+      storage.close();
     }
+  }
 
-    const opps = Object.values(state.opportunities);
-    const filtered =
-      briefId === null
-        ? opps
-        : opps.filter((o) => runOppIds.has(o.id) || state.runs.some(
-            (r) =>
-              r.briefId === briefId &&
-              r.drafts.some((d) => `opp_${d.id}` === o.id),
-          ));
+  async inspectOpportunity(opportunityId: string, requestedRunId?: ResearchRunId): Promise<{
+    opportunity: Opportunity;
+    runId: ResearchRunId;
+    evidence: readonly EvidenceItem[];
+    chunks: readonly Chunk[];
+    signals: readonly RawSignal[];
+  }> {
+    await this.migrateLegacyResearchState();
+    const storage = this.openCanonical();
+    try {
+      const matches = storage.researchRuns.list()
+        .filter((run) => !requestedRunId || run.id === requestedRunId)
+        .flatMap((run) => storage.opportunities.listByRun(run.id)
+          .filter((item) => item.id === opportunityId)
+          .map((opportunity) => ({ run, opportunity })));
+      const selected = requestedRunId ? matches[0] : matches.at(-1);
+      for (const { run, opportunity } of selected ? [selected] : []) {
+        const evidenceById = new Map(storage.evidenceItems.listByRun(run.id).map((item) => [item.id, item]));
+        return {
+          opportunity,
+          runId: run.id,
+          evidence: opportunity.evidenceItemIds.flatMap((id) => evidenceById.get(id) ?? []),
+          chunks: storage.chunks.listByRun(run.id),
+          signals: storage.rawSignals.listByRun(run.id),
+        };
+      }
+    } finally {
+      storage.close();
+    }
+    throw new Error(`Opportunity not found: ${opportunityId}`);
+  }
 
-    return filtered.sort((a, b) => a.demandStatement.localeCompare(b.demandStatement));
+  async listAdmissionResults(runId: ResearchRunId): Promise<readonly LibraryAdmissionRecord[]> {
+    await this.migrateLegacyResearchState();
+    const storage = this.openCanonical();
+    try {
+      if (!storage.researchRuns.get(runId)) throw new Error(`ResearchRun not found: ${runId}`);
+      return storage.libraryAdmissionResults.listByRun(runId) as LibraryAdmissionRecord[];
+    } finally {
+      storage.close();
+    }
   }
 
   async applyBoardCalibration(input: {
@@ -271,16 +512,17 @@ export class WorkspaceService {
     note?: string | null;
     actor?: ActorKind;
   }): Promise<{ opportunity: Opportunity; event: CalibrationEvent }> {
-    const state = await this.store.loadState();
-    const opportunity = state.opportunities[input.opportunityId];
+    const legacy = await this.store.loadState();
+    const inspection = await this.inspectOpportunity(input.opportunityId);
+    const opportunity = legacy.opportunities[input.opportunityId] ?? inspection.opportunity;
     if (!opportunity) {
       throw new Error(`Opportunity not found: ${input.opportunityId}`);
     }
 
     const validationContext = {
-      evidenceById: toEvidenceMap(state.evidenceById),
-      chunksById: toChunkMap(state.chunksById),
-      signalsById: toSignalMap(state.signalsById),
+      evidenceById: new Map(inspection.evidence.map((item) => [item.id, item])),
+      chunksById: new Map(inspection.chunks.map((item) => [item.id, item])),
+      signalsById: new Map(inspection.signals.map((item) => [item.id, item])),
     };
 
     const result = applyCalibration(
@@ -293,12 +535,12 @@ export class WorkspaceService {
     );
 
     const nextState: WorkspaceState = {
-      ...state,
+      ...legacy,
       opportunities: {
-        ...state.opportunities,
+        ...legacy.opportunities,
         [result.opportunity.id]: result.opportunity,
       },
-      calibrationEvents: [...state.calibrationEvents, result.event],
+      calibrationEvents: [...legacy.calibrationEvents, result.event],
     };
 
     await this.store.saveState(nextState);
@@ -396,7 +638,8 @@ export class WorkspaceService {
     start?: boolean;
   }): Promise<ValidationExperiment> {
     const state = await this.store.loadState();
-    const opportunity = state.opportunities[input.opportunityId];
+    const canonical = await this.inspectOpportunity(input.opportunityId);
+    const opportunity = state.opportunities[input.opportunityId] ?? canonical.opportunity;
     if (!opportunity) {
       throw new Error(`Opportunity not found: ${input.opportunityId}`);
     }
@@ -442,7 +685,8 @@ export class WorkspaceService {
       throw new Error(`Validation experiment not found: ${input.experimentId}`);
     }
 
-    const opportunity = state.opportunities[experiment.opportunityId];
+    const canonical = await this.inspectOpportunity(experiment.opportunityId as string);
+    const opportunity = state.opportunities[experiment.opportunityId] ?? canonical.opportunity;
     if (!opportunity) {
       throw new Error(`Opportunity not found: ${experiment.opportunityId}`);
     }
@@ -472,8 +716,9 @@ export class WorkspaceService {
   opportunitiesForRun(state: WorkspaceState, runId: ResearchRunId): Opportunity[] {
     const run = state.runs.find((r) => r.run.id === runId);
     if (!run) return [];
-    const oppIds = new Set(run.drafts.map((d) => `opp_${d.id}`));
-    return Object.values(state.opportunities).filter((o) => oppIds.has(o.id));
+    if (run.opportunities) return [...run.opportunities];
+    const ids = new Set(run.drafts.map((draft) => `opp_${draft.id}`));
+    return Object.values(state.opportunities).filter((opportunity) => ids.has(opportunity.id));
   }
 
   async compareMonitorDiff(input: {
@@ -481,12 +726,12 @@ export class WorkspaceService {
     baselineRunId: ResearchRunId;
     compareRunId: ResearchRunId;
   }): Promise<MonitorDiff> {
-    const brief = await this.store.getBrief(input.briefSlugOrId);
+    const brief = await this.getBrief(input.briefSlugOrId);
     if (!brief) {
       throw new Error(`Brief not found: ${input.briefSlugOrId}`);
     }
 
-    const state = await this.store.loadState();
+    const state = await this.getState();
     const baselineRun = state.runs.find((r) => r.run.id === input.baselineRunId);
     const compareRun = state.runs.find((r) => r.run.id === input.compareRunId);
     if (!baselineRun || baselineRun.briefId !== brief.id) {
@@ -514,10 +759,11 @@ export class WorkspaceService {
       createdAt: new Date().toISOString(),
     };
 
+    const legacy = await this.store.loadState();
     await this.store.saveState({
-      ...state,
+      ...legacy,
       monitorSchedules: {
-        ...state.monitorSchedules,
+        ...legacy.monitorSchedules,
         [scheduleId]: { ...schedule, lastComparedRunId: input.compareRunId },
       },
     });
@@ -526,7 +772,7 @@ export class WorkspaceService {
   }
 
   async getMonitorSchedule(briefSlugOrId: string): Promise<MonitorSchedule | null> {
-    const brief = await this.store.getBrief(briefSlugOrId);
+    const brief = await this.getBrief(briefSlugOrId);
     if (!brief) return null;
     const state = await this.store.loadState();
     return state.monitorSchedules[asId(`mon_${brief.id}`)] ?? null;
@@ -537,7 +783,7 @@ export class WorkspaceService {
     cadence: MonitorCadence;
     enabled?: boolean;
   }): Promise<MonitorSchedule> {
-    const brief = await this.store.getBrief(input.briefSlugOrId);
+    const brief = await this.getBrief(input.briefSlugOrId);
     if (!brief) {
       throw new Error(`Brief not found: ${input.briefSlugOrId}`);
     }

@@ -11,7 +11,7 @@ export interface DraftBuildInput {
 
 export function buildOpportunityDraft(input: DraftBuildInput): OpportunityDraft | null {
   const supporting = input.evidence.filter((item) => item.supportsClaim !== "disconfirming");
-  if (supporting.length < MIN_EVIDENCE_REF_COUNT) {
+  if (supporting.length === 0) {
     return null;
   }
 

@@ -42,13 +42,15 @@ function usage(): string {
 
 Usage:
   idea-finder workspace diagnostics
-  idea-finder brief create <slug> --title <text> [--description <text>] [--lens <l1,l2>]
+  idea-finder brief create <slug> --title <text> [--description <text>] [--lens <l1,l2>] [--manual-import <text> ...]
   idea-finder brief list
   idea-finder run <brief> [--fixture]
   idea-finder run <brief> --retry <runId>
   idea-finder run <brief> --resume <runId>
   idea-finder inbox [--brief <slug>]
   idea-finder library [--brief <slug>]
+  idea-finder library inspect <opportunityId> [--run <runId>]
+  idea-finder library rejected --run <runId>
   idea-finder board calibrate <opportunityId> --action <promote|reject|park|needs_more_evidence> [--note <text>]
   idea-finder validation add <opportunityId> --type <mom_test|landing|community_test|spike|custom> --hypothesis <text> [--start]
   idea-finder validation list [--opportunity <id>]
@@ -73,6 +75,17 @@ function flag(argv: readonly string[], name: string): string | undefined {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) usageFailure("cli.flag_value_required", `${name} requires a value`);
   return value;
+}
+
+function flags(argv: readonly string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] !== name) continue;
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) usageFailure("cli.flag_value_required", `${name} requires a value`);
+    values.push(value);
+  }
+  return values;
 }
 
 function has(argv: readonly string[], name: string): boolean {
@@ -119,11 +132,13 @@ interface ArgumentShape {
 
 const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
-  "brief create": { valueFlags: ["--title", "--description", "--lens"], positionalCount: 3 },
+  "brief create": { valueFlags: ["--title", "--description", "--lens", "--manual-import"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
   run: { valueFlags: ["--retry", "--resume"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
   inbox: { valueFlags: ["--brief"], positionalCount: 1 },
   library: { valueFlags: ["--brief"], positionalCount: 1 },
+  "library inspect": { valueFlags: ["--run"], positionalCount: 3 },
+  "library rejected": { valueFlags: ["--run"], positionalCount: 2 },
   "board calibrate": { valueFlags: ["--action", "--note"], positionalCount: 3 },
   "validation add": { valueFlags: ["--type", "--hypothesis"], booleanFlags: ["--start"], positionalCount: 3 },
   "validation list": { valueFlags: ["--opportunity"], positionalCount: 2 },
@@ -138,7 +153,7 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
 
 function validateArguments(argv: readonly string[]): void {
   const [cmd, sub] = argv;
-  const key = cmd === "run" || cmd === "inbox" || cmd === "library" || cmd === "export" ? cmd : `${cmd ?? ""} ${sub ?? ""}`.trim();
+  const key = cmd === "run" || cmd === "inbox" || cmd === "export" || (cmd === "library" && (!sub || sub.startsWith("--"))) ? cmd : `${cmd ?? ""} ${sub ?? ""}`.trim();
   const shape = ARGUMENT_SHAPES[key];
   if (!shape) return;
   const valueFlags = new Set(shape.valueFlags);
@@ -189,7 +204,14 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const slug = required(rest[0], "brief.slug_required", "brief create requires <slug>");
     const title = required(flag(rest, "--title"), "brief.title_required", "--title is required");
     const lensesRaw = flag(rest, "--lens");
-    const brief = await svc(workspaceDir).createBrief({ slug, title, description: flag(rest, "--description") ?? "", lenses: lensesRaw?.split(",").map((item) => item.trim()) });
+    const manualImports = flags(rest, "--manual-import").map((text) => ({ text }));
+    const brief = await svc(workspaceDir).createBrief({
+      slug,
+      title,
+      description: flag(rest, "--description") ?? "",
+      lenses: lensesRaw?.split(",").map((item) => item.trim()),
+      queryPlan: manualImports.length > 0 ? { harvestMode: "manual", manualImports } : undefined,
+    });
     return { command: "brief create", data: { brief }, human: `Created brief ${brief.slug} (${brief.id})` };
   }
 
@@ -240,10 +262,27 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     return { command: "inbox", data: result, human };
   }
 
+  if (cmd === "library" && sub === "inspect") {
+    const opportunityId = required(rest[0], "library.opportunity_required", "library inspect requires <opportunityId>");
+    const result = await svc(workspaceDir).inspectOpportunity(opportunityId, flag(rest, "--run") as never);
+    return { command: "library inspect", data: result, human: `${result.opportunity.id}\t${result.opportunity.status}\t${result.opportunity.demandStatement}` };
+  }
+
+  if (cmd === "library" && sub === "rejected") {
+    const runId = required(flag(rest, "--run"), "library.run_required", "library rejected requires --run <runId>");
+    const results = (await svc(workspaceDir).listAdmissionResults(runId as never)).filter((result) => result.decision === "rejected");
+    return { command: "library rejected", data: { runId, results }, human: results.length === 0 ? "No rejected drafts." : results.map((result) => `${result.id}\t${result.issues.map((issue) => issue.code).join(",")}`).join("\n") };
+  }
+
   if (cmd === "library") {
-    const opportunities = await svc(workspaceDir).listOpportunities(flag(argv, "--brief"));
-    const human = opportunities.length === 0 ? "Opportunity library is empty." : ["id\tstatus\tconfidence\tevidence\tdemand", ...opportunities.map((item) => `${item.id}\t${item.status}\t${item.confidence}\t${item.evidenceItemIds.length}\t${item.demandStatement}`)].join("\n");
-    return { command: "library", data: { opportunities }, human };
+    const service = svc(workspaceDir);
+    const brief = flag(argv, "--brief");
+    const [opportunities, entries] = await Promise.all([
+      service.listOpportunities(brief),
+      service.listOpportunityEntries(brief),
+    ]);
+    const human = entries.length === 0 ? "Opportunity library is empty." : ["id\trun\tstatus\tconfidence\tevidence\tdemand", ...entries.map(({ runId, opportunity }) => `${opportunity.id}\t${runId}\t${opportunity.status}\t${opportunity.confidence}\t${opportunity.evidenceItemIds.length}\t${opportunity.demandStatement}`)].join("\n");
+    return { command: "library", data: { opportunities, entries }, human };
   }
 
   if (cmd === "board" && sub === "calibrate") {

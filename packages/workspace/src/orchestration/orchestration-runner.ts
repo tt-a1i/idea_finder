@@ -17,6 +17,7 @@ import type { HuntingBrief } from "../types.js";
 import type { ResearchRunner } from "../ports/research-runner.js";
 import {
   buildQueryPlanFromBrief,
+  effectiveResearchConfig,
   effectiveResearchConfigHash,
   queryTermsFromBrief,
   resolveHarvestMode,
@@ -72,6 +73,7 @@ export function createOrchestrationResearchRunner(
         });
 
         const queryPlan = buildQueryPlanFromBrief(brief, request.taskId);
+        const effectiveConfig = effectiveResearchConfig(brief);
         const configHash = effectiveResearchConfigHash(brief);
 
         const run = request.execution === "new"
@@ -87,6 +89,11 @@ export function createOrchestrationResearchRunner(
         if (run.huntingTaskId !== request.taskId || run.configHash !== configHash) {
           throw new Error(`ResearchRun configuration mismatch: ${request.runId}`);
         }
+        storage.researchRunConfigs.save({
+          id: run.id,
+          effectiveConfig,
+          execution: request.execution,
+        });
 
         let completed;
         try {
@@ -96,13 +103,35 @@ export function createOrchestrationResearchRunner(
           if (!completed) throw new Error(`ResearchRun not found after failure: ${run.id}`);
         }
 
+        const documents = storage.rawDocuments.listByRun(run.id);
+        const configuredSources = resolveHarvestMode(brief) === "manual"
+          ? ["manual"]
+          : [...new Set([
+              ...queryPlan.searches.map((search) => search.platform),
+              ...(queryPlan.manualImports?.length ? ["manual"] : []),
+            ])];
+        const sourceStatuses = configuredSources.map((source) => ({
+          id: source,
+          source,
+          status: completed.status === "failed" ? "failure" as const : "success" as const,
+          itemCount: documents.filter((document) => document.platform === source).length,
+          reason: completed.errorMessage,
+          completedAt: completed.completedAt ?? new Date().toISOString(),
+        }));
+        for (const status of sourceStatuses) storage.sourceStatuses.save(run.id, status);
+
         return {
           execution: request.execution,
           run: completed,
+          documents,
           chunks: storage.chunks.listByRun(run.id),
           signals: storage.rawSignals.listByRun(run.id),
           evidence: storage.evidenceItems.listByRun(run.id),
           drafts: storage.opportunityDrafts.listByRun(run.id),
+          opportunities: storage.opportunities.listByRun(run.id),
+          admissionResults: storage.libraryAdmissionResults.listByRun(run.id) as never,
+          sourceStatuses,
+          config: { id: run.id, effectiveConfig, execution: request.execution },
         };
       } finally {
         storage.close();

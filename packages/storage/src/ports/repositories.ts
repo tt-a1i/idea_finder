@@ -12,12 +12,20 @@ import type {
 
 export interface ResearchRunRepository {
   get(id: ResearchRunId): ResearchRun | null;
+  list(): ResearchRun[];
+  listByTask(huntingTaskId: string): ResearchRun[];
   save(run: ResearchRun): void;
+}
+
+export interface JsonEntityRepository<T extends { readonly id: string }> {
+  get(id: string): T | null;
+  list(): T[];
+  save(entity: T): void;
 }
 
 export interface RunScopedRepository<T extends { id: string }> {
   save(runId: ResearchRunId, entity: T): void;
-  get(id: string): T | null;
+  get(runId: ResearchRunId, id: string): T | null;
   listByRun(runId: ResearchRunId): T[];
 }
 

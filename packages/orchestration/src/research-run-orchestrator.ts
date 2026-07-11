@@ -31,6 +31,7 @@ export type OrchestratorStores = Pick<
   | "evidenceItems"
   | "opportunityDrafts"
   | "opportunities"
+  | "libraryAdmissionResults"
   | "calibrationEvents"
   | "pipelineSteps"
   | "audit"
@@ -123,7 +124,7 @@ export function createResearchRunOrchestrator(
         if (
           !stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission)
         ) {
-          admitRunToLibrary(runId, stores);
+          await admitRunToLibrary(runId, stores);
           stores.pipelineSteps.markComplete(
             runId,
             PIPELINE_STEPS.libraryAdmission,
@@ -160,7 +161,7 @@ export function createResearchRunOrchestrator(
   };
 }
 
-function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): void {
+async function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): Promise<void> {
   const drafts = stores.opportunityDrafts.listByRun(runId);
   const evidence = stores.evidenceItems.listByRun(runId);
   const chunks = stores.chunks.listByRun(runId);
@@ -187,8 +188,19 @@ function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): vo
     stores.opportunities.save(runId, opportunity);
   }
 
+  for (const draft of drafts) {
+    const opportunity = admitted.find((item) => item.id === `opp_${draft.id}`);
+    const rejection = rejected.find((entry) => entry.draftId === draft.id);
+    stores.libraryAdmissionResults.save(runId, {
+      id: draft.id,
+      decision: opportunity ? "admitted" : "rejected",
+      opportunityId: opportunity?.id ?? null,
+      issues: rejection?.issues ?? [],
+    });
+  }
+
   if (rejected.length > 0) {
-    void stores.audit.append({
+    await stores.audit.append({
       at: new Date().toISOString(),
       actor: "pipeline",
       action: "policy.denied",

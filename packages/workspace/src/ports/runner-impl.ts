@@ -1,10 +1,10 @@
-import { asId } from "@idea-finder/core";
+import { admitToLibrary, asId } from "@idea-finder/core";
 import { randomUUID } from "node:crypto";
 import type { HuntingTaskId, ResearchRunId } from "@idea-finder/core";
 import type { ResearchRun } from "@idea-finder/core";
 import { invoicingFixture } from "../fixtures/invoicing-fixture.js";
 import { createOrchestrationResearchRunner } from "../orchestration/orchestration-runner.js";
-import { effectiveResearchConfigHash } from "../orchestration/query-plan-builder.js";
+import { effectiveResearchConfig, effectiveResearchConfigHash } from "../orchestration/query-plan-builder.js";
 import type { HuntingBrief } from "../types.js";
 import type {
   ResearchRunOutput,
@@ -20,6 +20,12 @@ export function createFixtureResearchRunner(): ResearchRunner {
         throw new Error("Fixture mode only supports new ResearchRuns");
       }
       const now = new Date().toISOString();
+      const evidenceById = new Map(invoicingFixture.evidence.map((item) => [item.id, item]));
+      const chunksById = new Map(invoicingFixture.chunks.map((item) => [item.id, item]));
+      const signalsById = new Map(invoicingFixture.signals.map((item) => [item.id, item]));
+      const admission = admitToLibrary(invoicingFixture.drafts, evidenceById, chunksById, signalsById);
+      const rejectedByDraft = new Map(admission.rejected.map((item) => [item.draftId, item]));
+      const effectiveConfig = effectiveResearchConfig(brief);
       return {
         execution: request.execution,
         run: {
@@ -31,10 +37,20 @@ export function createFixtureResearchRunner(): ResearchRunner {
           configHash: effectiveResearchConfigHash(brief),
           errorMessage: null,
         },
+        documents: [],
         chunks: [...invoicingFixture.chunks],
         signals: [...invoicingFixture.signals],
         evidence: [...invoicingFixture.evidence],
         drafts: [...invoicingFixture.drafts],
+        opportunities: admission.admitted,
+        admissionResults: invoicingFixture.drafts.map((draft) => ({
+          id: draft.id,
+          decision: admission.admitted.some((item) => item.id === `opp_${draft.id}`) ? "admitted" : "rejected",
+          opportunityId: admission.admitted.find((item) => item.id === `opp_${draft.id}`)?.id ?? null,
+          issues: rejectedByDraft.get(draft.id)?.issues ?? [],
+        })),
+        sourceStatuses: [{ id: "fixture", source: "fixture", status: "success", itemCount: invoicingFixture.chunks.length, reason: null, completedAt: now }],
+        config: { id: request.runId, effectiveConfig, execution: request.execution },
       };
     },
   };

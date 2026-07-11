@@ -85,6 +85,34 @@ describe("@idea-finder/storage local persistence", () => {
     }
   });
 
+  it("migrates legacy globally keyed material tables to run-scoped identity", () => {
+    const dataDir = tempDataDir();
+    try {
+      const legacy = new DatabaseSync(join(dataDir, "idea_finder.db"));
+      legacy.exec(`
+        CREATE TABLE raw_documents (
+          id TEXT PRIMARY KEY,
+          research_run_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_raw_documents_run ON raw_documents (research_run_id);
+        INSERT INTO raw_documents VALUES
+          ('doc_shared', 'run_legacy_a', '{"id":"doc_shared","rawBody":"legacy"}');
+      `);
+      legacy.close();
+
+      const storage = openLocalStorage({ dataDir });
+      const migrated = storage.rawDocuments.listByRun(asId("run_legacy_a"));
+      expect(migrated).toEqual([{ id: "doc_shared", rawBody: "legacy" }]);
+      storage.rawDocuments.save(asId("run_legacy_b"), migrated[0]!);
+      expect(storage.rawDocuments.listByRun(asId("run_legacy_a"))).toHaveLength(1);
+      expect(storage.rawDocuments.listByRun(asId("run_legacy_b"))).toHaveLength(1);
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips run-scoped entities", () => {
     const dataDir = tempDataDir();
     const runId = asId("run_entities");
@@ -108,10 +136,60 @@ describe("@idea-finder/storage local persistence", () => {
       };
 
       storage.rawDocuments.save(runId, doc);
-      expect(storage.rawDocuments.get(asId("doc_1"))).toEqual(doc);
+      expect(storage.rawDocuments.get(runId, asId("doc_1"))).toEqual(doc);
       expect(storage.rawDocuments.listByRun(runId)).toEqual([doc]);
 
       storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps equal entity IDs scoped to distinct ResearchRuns", () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      const entity = {
+        id: asId("doc_shared"),
+        sourceTier: "L1" as const,
+        platform: "manual",
+        externalId: "same",
+        url: "manual://same",
+        fetchedAt: "2026-07-11T00:00:00.000Z",
+        fetchMethod: "import" as const,
+        fetchAgentRunId: null,
+        contentType: "page" as const,
+        rawBody: "same evidence",
+        huntingTaskId: asId("task_shared"),
+        retentionClass: "pinned" as const,
+        legalBasis: "user_provided" as const,
+      };
+      storage.rawDocuments.save(asId("run_a"), entity);
+      storage.rawDocuments.save(asId("run_b"), entity);
+      expect(storage.rawDocuments.listByRun(asId("run_a"))).toEqual([entity]);
+      expect(storage.rawDocuments.listByRun(asId("run_b"))).toEqual([entity]);
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists canonical Brief, config, admission, and source status records", () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      storage.huntingBriefs.save({ id: "task_canonical", slug: "canonical" });
+      storage.researchRunConfigs.save({ id: "run_canonical", effectiveConfig: { mode: "manual" }, execution: "new" });
+      storage.libraryAdmissionResults.save(asId("run_canonical"), { id: "draft_1", decision: "rejected", opportunityId: null, issues: [{ code: "evidence.low" }] });
+      storage.sourceStatuses.save(asId("run_canonical"), { id: "manual", source: "manual", status: "success", itemCount: 0, reason: null, completedAt: "2026-07-11T00:00:00.000Z" });
+      storage.close();
+
+      const restarted = openLocalStorage({ dataDir });
+      expect(restarted.huntingBriefs.list()).toEqual([{ id: "task_canonical", slug: "canonical" }]);
+      expect(restarted.researchRunConfigs.get("run_canonical")).toMatchObject({ effectiveConfig: { mode: "manual" } });
+      expect(restarted.libraryAdmissionResults.listByRun(asId("run_canonical"))).toHaveLength(1);
+      expect(restarted.sourceStatuses.listByRun(asId("run_canonical"))).toHaveLength(1);
+      restarted.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }

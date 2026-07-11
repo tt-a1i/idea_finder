@@ -42,6 +42,8 @@ npm run cli -- run invoicing --fixture
 # Signal inbox summary and opportunity library
 npm run cli -- inbox --brief invoicing
 npm run cli -- library --brief invoicing
+npm run cli -- library inspect opp_example
+npm run cli -- library rejected --run run_example
 
 # Board calibration
 npm run cli -- board calibrate opp_draft-valid --action promote --note "ready to validate"
@@ -85,6 +87,20 @@ Normal `run` execution uses the real local pipeline under `<workspace>/pipeline/
 | Harvest | `@idea-finder/harvest` | Manual import by default (no network) |
 | Intelligence | `@idea-finder/intelligence` | Deterministic rule pipeline |
 | Library | `@idea-finder/orchestration` | `ResearchRunOrchestrator` + `admitToLibrary` |
+
+The same SQLite database is canonical for Briefs, ResearchRuns, effective
+configuration, harvested documents, chunks, signals, evidence, drafts,
+admission outcomes, source status, and Opportunity Library reads. Existing
+`briefs/*.json` and research fields in `state.json` are imported idempotently on
+first access; conflicting Brief identities fail closed instead of being silently
+overwritten. Decision, validation, and monitor state remains on the compatibility
+path until its dedicated migration.
+
+Library entities remain stored per ResearchRun. Library list output includes a
+`runId` for every occurrence so `library inspect <id> --run <runId>` forms an
+unambiguous list-to-inspect path across Briefs and historical runs. Commands
+using only an Opportunity ID select its globally latest occurrence solely for
+backward compatibility.
 
 **Harvest modes** (set on brief JSON `queryPlan.harvestMode`):
 

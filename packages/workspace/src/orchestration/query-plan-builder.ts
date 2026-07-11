@@ -53,8 +53,8 @@ export function buildQueryPlanFromBrief(
   };
 }
 
-export function effectiveResearchConfigHash(brief: HuntingBrief): string {
-  const effective = {
+export function effectiveResearchConfig(brief: HuntingBrief): Readonly<Record<string, unknown>> {
+  return {
     description: brief.description,
     harvestMode: resolveHarvestMode(brief),
     sourcesEnabled: [...brief.sourcesEnabled].sort(),
@@ -74,7 +74,10 @@ export function effectiveResearchConfigHash(brief: HuntingBrief): string {
       })),
     },
   };
-  return `sha256:${createHash("sha256").update(JSON.stringify(effective)).digest("hex")}`;
+}
+
+export function effectiveResearchConfigHash(brief: HuntingBrief): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(effectiveResearchConfig(brief))).digest("hex")}`;
 }
 
 export function queryTermsFromBrief(brief: HuntingBrief): string[] {

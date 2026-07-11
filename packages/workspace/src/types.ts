@@ -8,6 +8,7 @@ import type {
   OpportunityDraft,
   RawSignal,
   ResearchRun,
+  RawDocument,
   ValidationExperiment,
 } from "@idea-finder/core";
 import type { DraftRejection } from "@idea-finder/core";
@@ -18,6 +19,28 @@ import type {
   PolicyDenial,
 } from "@idea-finder/agents";
 import type { ResearchRunExecution } from "./ports/research-runner.js";
+
+export interface StoredResearchRunConfig {
+  readonly id: string;
+  readonly effectiveConfig: Readonly<Record<string, unknown>>;
+  readonly execution: ResearchRunExecution;
+}
+
+export interface LibraryAdmissionRecord {
+  readonly id: string;
+  readonly decision: "admitted" | "rejected";
+  readonly opportunityId: string | null;
+  readonly issues: readonly { readonly code: string; readonly message: string }[];
+}
+
+export interface ResearchSourceStatus {
+  readonly id: string;
+  readonly source: string;
+  readonly status: "success" | "failure";
+  readonly itemCount: number;
+  readonly reason: string | null;
+  readonly completedAt: string;
+}
 
 export interface ManualImportConfig {
   readonly text: string;
@@ -95,11 +118,15 @@ export interface StoredResearchRun {
   readonly execution: ResearchRunExecution;
   readonly run: ResearchRun;
   readonly briefId: HuntingTaskId;
+  readonly documents: readonly RawDocument[];
   readonly chunks: readonly Chunk[];
   readonly signals: readonly RawSignal[];
   readonly evidence: readonly EvidenceItem[];
   readonly drafts: readonly OpportunityDraft[];
+  readonly opportunities: readonly Opportunity[];
   readonly rejected: readonly DraftRejection[];
+  readonly admissionResults?: readonly LibraryAdmissionRecord[];
+  readonly sourceStatuses?: readonly ResearchSourceStatus[];
   readonly admittedCount: number;
   readonly inbox: readonly InboxSignalSummary[];
 }

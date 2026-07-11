@@ -173,14 +173,13 @@ describe("installed standalone CLI", () => {
     expect(resumed.envelope).toMatchObject({ data: { execution: "resumed", run: { id: firstData.run.id, status: "completed" } } });
     expect(retried.envelope).toMatchObject({ data: { execution: "retried", run: { id: secondData.run.id, status: "completed" } } });
 
-    const briefPath = path.join(workspace, "briefs", "lifecycle.json");
-    const brief = JSON.parse(await readFile(briefPath, "utf8")) as Record<string, unknown>;
-    brief.queryPlan = {
-      harvestMode: "manual",
-      manualImports: [{ text: "Explicit interview: this workflow is painful and I would pay to replace it." }],
-    };
-    await writeFile(briefPath, `${JSON.stringify(brief, null, 2)}\n`, "utf8");
-    const explicitImport = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    const explicitBrief = await invoke(executable, [
+      "brief", "create", "explicit-import", "--title", "Explicit import",
+      "--manual-import", "Explicit interview: this workflow is painful and I would pay to replace it.",
+      "--workspace", workspace, "--json",
+    ], consumer);
+    expect(explicitBrief.code).toBe(0);
+    const explicitImport = await invoke(executable, ["run", "explicit-import", "--workspace", workspace, "--json"], consumer);
     expect(explicitImport.code).toBe(0);
     const explicitData = explicitImport.envelope.data as typeof firstData;
     expect(explicitData.chunks).toHaveLength(1);
@@ -192,6 +191,55 @@ describe("installed standalone CLI", () => {
     expect(fixtureData.execution).toBe("new");
     expect(fixtureData.run.id).not.toBe(firstData.run.id);
     expect(fixtureData.evidence.length).toBeGreaterThan(0);
+  });
+
+  it("restarts from canonical SQLite and inspects admitted and rejected Library results", async () => {
+    const created = await invoke(executable, [
+      "brief", "create", "canonical", "--title", "Canonical research",
+      "--description", "Explicit research persisted in SQLite",
+      "--manual-import", "I invoice from a Google Sheet every month — painful workaround reconciling Stripe payouts.",
+      "--manual-import", "Would pay $30/mo for lightweight solo SaaS invoicing with Stripe sync.",
+      "--manual-import", "Need something simpler than QuickBooks for month-end invoicing.",
+      "--manual-import", "QuickBooks works fine for enterprise — not a problem for us.",
+      "--workspace", workspace, "--json",
+    ], consumer);
+    expect(created.code).toBe(0);
+    const researched = await invoke(executable, ["run", "canonical", "--workspace", workspace, "--json"], consumer);
+    expect(researched.code).toBe(0);
+    const result = researched.envelope.data as {
+      run: { id: string };
+      documents: unknown[];
+      admittedCount: number;
+      rejected: unknown[];
+      opportunities: Array<{ id: string }>;
+    };
+    expect(result.documents).toHaveLength(4);
+    expect(result.admittedCount).toBeGreaterThan(0);
+    expect(result.rejected.length).toBeGreaterThan(0);
+
+    await writeFile(path.join(workspace, "state.json"), JSON.stringify({ version: 1, opportunities: { poisoned: true } }), "utf8");
+    const listedBriefs = await invoke(executable, ["brief", "list", "--workspace", workspace, "--json"], consumer);
+    expect(listedBriefs.envelope).toMatchObject({ data: { briefs: expect.arrayContaining([expect.objectContaining({ slug: "canonical" })]) } });
+    const library = await invoke(executable, ["library", "--brief", "canonical", "--workspace", workspace, "--json"], consumer);
+    const libraryData = library.envelope.data as {
+      opportunities: Array<{ id: string }>;
+      entries: Array<{ runId: string; opportunity: { id: string } }>;
+    };
+    const opportunities = libraryData.opportunities;
+    expect(opportunities.length).toBeGreaterThan(0);
+    const listedOccurrence = libraryData.entries.find((entry) => entry.opportunity.id === opportunities[0]!.id)!;
+    expect(listedOccurrence.runId).toBe(result.run.id);
+    const inspected = await invoke(executable, ["library", "inspect", opportunities[0]!.id, "--run", listedOccurrence.runId, "--workspace", workspace, "--json"], consumer);
+    expect(inspected.envelope).toMatchObject({ command: "library inspect", data: { opportunity: { id: opportunities[0]!.id }, runId: result.run.id } });
+    const rejected = await invoke(executable, ["library", "rejected", "--run", result.run.id, "--workspace", workspace, "--json"], consumer);
+    expect((rejected.envelope.data as { results: unknown[] }).results.length).toBeGreaterThan(0);
+
+    const db = new DatabaseSync(path.join(workspace, "pipeline", "idea_finder.db"));
+    for (const table of ["hunting_briefs", "research_run_configs", "raw_documents", "chunks", "raw_signals", "evidence_items", "opportunity_drafts", "library_admission_results", "source_statuses"]) {
+      const count = (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+      expect(count, table).toBeGreaterThan(0);
+    }
+    db.close();
   });
 
   it("pins usage, validation, missing-resource, policy, and internal error exits", async () => {

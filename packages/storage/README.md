@@ -37,7 +37,9 @@ storage.close();
 ## Repositories
 
 - `researchRuns` — keyed by run id; equal `(huntingTaskId, configHash)` values may belong to distinct intentional scans
+- `huntingBriefs`, `researchRunConfigs` — canonical Briefs and effective run configuration snapshots
 - `rawDocuments`, `chunks`, `rawSignals`, `evidenceItems`, `opportunityDrafts`, `opportunities`, `calibrationEvents` — run-scoped JSON payloads
+- `libraryAdmissionResults`, `sourceStatuses` — admitted/rejected outcomes and source execution state
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events
