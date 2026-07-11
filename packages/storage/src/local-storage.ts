@@ -33,6 +33,7 @@ import type {
   MetricObservationRepository,
   TrendEventRepository,
   TrendSeriesRepository,
+  NormalizationContextRepository,
 } from "./ports/repositories.js";
 import { createPipelineStepStore } from "./sqlite/pipeline-step-store.js";
 import { createJsonEntityRepository } from "./sqlite/json-entity-repository.js";
@@ -41,7 +42,7 @@ import { createCalibrationEventRepository } from "./sqlite/calibration-event-rep
 import { createResearchRunRepository } from "./sqlite/research-run-repository.js";
 import { createRunScopedRepository } from "./sqlite/run-scoped-repository.js";
 import { initSchema } from "./sqlite/schema.js";
-import { createMetricObservationRepository, createTrendEventRepository, createTrendSeriesRepository } from "./sqlite/quantitative-repositories.js";
+import { createMetricObservationRepository, createNormalizationContextRepository, createTrendEventRepository, createTrendSeriesRepository } from "./sqlite/quantitative-repositories.js";
 
 export interface LocalStorageOptions {
   /** Directory containing idea_finder.db and blobs/ (e.g. ./data). */
@@ -89,10 +90,11 @@ export interface StoredQuantitativeSourceStatusRecord {
   readonly id: string;
   readonly source: string;
   readonly subjectExternalId: string;
-  readonly status: "success" | "failure";
+  readonly status: "success" | "failure" | "partial" | "rate_limited" | "authorization_required" | "throttled" | "unavailable" | "response_drift";
   readonly itemCount: number;
   readonly reason: string | null;
   readonly checkedAt: string;
+  readonly [field: string]: unknown;
 }
 
 export interface LocalStorage {
@@ -104,6 +106,7 @@ export interface LocalStorage {
   readonly monitorComparisons: JsonEntityRepository<StoredMonitorComparisonRecord>;
   readonly agentTasks: JsonEntityRepository<{ readonly id: string }>;
   readonly metricObservations: MetricObservationRepository;
+  readonly normalizationContexts: NormalizationContextRepository;
   readonly trendSeries: TrendSeriesRepository;
   readonly trendEvents: TrendEventRepository;
   readonly quantitativeSourceStatuses: JsonEntityRepository<StoredQuantitativeSourceStatusRecord>;
@@ -142,6 +145,7 @@ export function openLocalStorage(options: LocalStorageOptions): LocalStorage {
     monitorComparisons: createJsonEntityRepository(db, "monitor_comparisons"),
     agentTasks: createJsonEntityRepository(db, "agent_tasks"),
     metricObservations: createMetricObservationRepository(db),
+    normalizationContexts: createNormalizationContextRepository(db),
     trendSeries: createTrendSeriesRepository(db),
     trendEvents: createTrendEventRepository(db),
     quantitativeSourceStatuses: createJsonEntityRepository(db, "quantitative_source_statuses"),

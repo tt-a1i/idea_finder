@@ -8,7 +8,7 @@ import {
   classifyGitHubMetric,
   createGitHubMetricObservation,
   detectLatestTrendEvent,
-  type MetricObservation,
+  type GitHubMetricObservation,
   type Opportunity,
 } from "../../src/index.js";
 
@@ -20,7 +20,7 @@ const provenance = {
   collectedAt: "2026-07-11T01:00:00.000Z",
 };
 
-function observation(id: string, observedAt: string, value: number): MetricObservation {
+function observation(id: string, observedAt: string, value: number): GitHubMetricObservation {
   return createGitHubMetricObservation({
     id: asId(id),
     subject: {

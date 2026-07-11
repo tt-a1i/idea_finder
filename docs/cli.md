@@ -114,6 +114,25 @@ issue activity, and open-issue counts are classified only as developer-adoption
 or supply evidence. They are not `RawSignal`/`EvidenceItem` records and cannot by
 themselves satisfy Library admission or promotion.
 
+Google Trends search momentum requires an explicit subject, geography, and time
+window. Production collection is fail-closed until an approved Google API or
+public-dataset transport is configured; the project does not scrape private
+Google web endpoints. Recorded fixtures are opt-in for deterministic tests:
+
+```bash
+idea-finder trends collect google "agent coding" --geo US \
+  --from 2026-01-01T00:00:00Z --to 2026-01-10T00:00:00Z \
+  --granularity day --fixture --fixture-pattern sustained --json
+idea-finder trends inspect google "agent coding" --geo US --json
+```
+
+The canonical normalization context records the 0–100 relative scale,
+geography, window, resolution, comparison set, and partial-bucket state.
+Detected outcomes are `spike`, `seasonal`, `sustained_growth`,
+`insufficient_history`, or `no_pattern`. Authorization, throttling, unavailable
+data, and response drift remain visible source-health states and never become
+silent zero observations.
+
 Library entities remain stored per ResearchRun. Library list output includes a
 `runId` for every occurrence so `library inspect <id> --run <runId>` forms an
 unambiguous list-to-inspect path across Briefs and historical runs. Commands

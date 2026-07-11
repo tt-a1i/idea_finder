@@ -15,6 +15,7 @@ import type {
   MetricObservationId,
   TrendSeriesId,
   TrendEventId,
+  NormalizationContextId,
 } from "./ids.js";
 
 export type SourceTier = "L0" | "L1" | "L2" | "L3";
@@ -281,7 +282,7 @@ export interface MonitorDiff {
 }
 
 /** Quantitative evidence is deliberately separate from qualitative RawSignal/EvidenceItem. */
-export type QuantitativeEvidenceLane = "developer_adoption" | "supply";
+export type QuantitativeEvidenceLane = "developer_adoption" | "supply" | "search_momentum";
 
 export type GitHubMetric =
   | "stars"
@@ -293,8 +294,10 @@ export type GitHubMetric =
   | "repository_count"
   | "trending_rank";
 
+export type GoogleTrendsMetric = "relative_search_interest";
+
 export interface MetricSubject {
-  readonly kind: "repository" | "organization" | "topic";
+  readonly kind: "repository" | "organization" | "topic" | "search_term";
   readonly externalId: string;
   readonly url: string;
 }
@@ -307,7 +310,7 @@ export interface MetricObservationProvenance {
   readonly collectedAt: string;
 }
 
-export interface MetricObservation {
+export interface GitHubMetricObservation {
   readonly id: MetricObservationId;
   readonly subject: MetricSubject;
   readonly source: "github";
@@ -322,7 +325,59 @@ export interface MetricObservation {
   readonly provenance: MetricObservationProvenance;
 }
 
-export interface TrendSeries {
+export interface ObservationWindow {
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly resolution: "hour" | "day" | "week" | "month";
+  readonly timezone: string;
+}
+
+export interface GoogleTrendsNormalizationContext {
+  readonly id: NormalizationContextId;
+  readonly source: "google_trends";
+  readonly method: "relative_interest_0_100_v1";
+  readonly geography: string;
+  readonly window: ObservationWindow;
+  readonly comparisonSubjects: readonly string[];
+  /** Optional provider-declared anchor used to normalize the comparison set. */
+  readonly anchor: string | null;
+  readonly category: string;
+  readonly property: "web" | "news" | "images" | "youtube" | "shopping";
+  readonly scale: { readonly min: 0; readonly max: 100 };
+  readonly includesPartialBucket: boolean;
+}
+
+export interface GoogleTrendsObservationProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface:
+    | "google_trends_authorized_api"
+    | "google_trends_public_dataset"
+    | "recorded_fixture";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+}
+
+export interface GoogleTrendsMetricObservation {
+  readonly id: MetricObservationId;
+  readonly subject: MetricSubject & { readonly kind: "search_term" };
+  readonly source: "google_trends";
+  readonly metric: GoogleTrendsMetric;
+  readonly lane: "search_momentum";
+  readonly geography: string;
+  readonly observedAt: string;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly unit: "relative_interest_0_100";
+  readonly collectionMethod: GoogleTrendsObservationProvenance["interface"];
+  readonly normalizationContextId: NormalizationContextId;
+  readonly partial: boolean;
+  readonly provenance: GoogleTrendsObservationProvenance;
+}
+
+export type MetricObservation = GitHubMetricObservation | GoogleTrendsMetricObservation;
+
+export interface GitHubTrendSeries {
   readonly id: TrendSeriesId;
   readonly subject: MetricSubject;
   readonly source: "github";
@@ -333,9 +388,25 @@ export interface TrendSeries {
   readonly endedAt: string;
 }
 
+export interface GoogleTrendsSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: MetricSubject & { readonly kind: "search_term" };
+  readonly source: "google_trends";
+  readonly metric: GoogleTrendsMetric;
+  readonly lane: "search_momentum";
+  readonly geography: string;
+  readonly normalizationContextId: NormalizationContextId;
+  readonly window: ObservationWindow;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export type TrendSeries = GitHubTrendSeries | GoogleTrendsSeries;
+
 export type TrendEventKind = "momentum_up" | "momentum_down" | "stable";
 
-export interface TrendEvent {
+export interface DeltaTrendEvent {
   readonly id: TrendEventId;
   readonly seriesId: TrendSeriesId;
   readonly kind: TrendEventKind;
@@ -348,3 +419,37 @@ export interface TrendEvent {
   readonly relativeDelta: number | null;
   readonly detector: "two_point_delta_v1";
 }
+
+export type SearchMomentumPattern =
+  | "spike"
+  | "seasonal"
+  | "sustained_growth"
+  | "insufficient_history"
+  | "no_pattern";
+
+export interface SearchMomentumClassifierRules {
+  readonly minHistoryBuckets: number;
+  readonly spikeBaselineBuckets: number;
+  readonly spikeMultiplier: number;
+  readonly spikeReturnRatio: number;
+  readonly seasonalPeriodBuckets: number;
+  readonly seasonalMinPeriods: number;
+  readonly seasonalCorrelationThreshold: number;
+  readonly seasonalMaxLevelShiftRatio: number;
+  readonly growthWindowBuckets: number;
+  readonly growthMinRelativeIncrease: number;
+  readonly growthMinPositiveStepRatio: number;
+}
+
+export interface SearchMomentumTrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: SearchMomentumPattern;
+  readonly detectedAt: string;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly normalizationContextId: NormalizationContextId;
+  readonly detector: "search_momentum_v1";
+  readonly rules: SearchMomentumClassifierRules;
+}
+
+export type TrendEvent = DeltaTrendEvent | SearchMomentumTrendEvent;

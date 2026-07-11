@@ -43,6 +43,7 @@ storage.close();
 - `calibrationEvents` — append-only Decision Board history scoped by ResearchRun
 - `validationExperiments`, `monitorSchedules`, `monitorComparisons`, `agentTasks` — canonical runtime state
 - `metricObservations`, `trendSeries`, `trendEvents`, `quantitativeSourceStatuses` — canonical quantitative observations, derived momentum, provenance, and source health; stable identities and references fail closed
+- `normalizationContexts` — Google Trends relative-scale context; geography, window, comparison set, and partial-bucket identity are preserved so incompatible 0–100 values cannot be combined
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

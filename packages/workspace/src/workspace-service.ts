@@ -5,11 +5,14 @@ import {
   computeMonitorDiff as buildMonitorDiff,
   createValidationExperiment as buildValidationExperiment,
   buildTrendSeries,
+  buildGoogleTrendSeries,
+  classifySearchMomentum,
   createGitHubMetricObservation,
+  createGoogleTrendsObservation,
   detectLatestTrendEvent,
   startValidationExperiment as markValidationExperimentRunning,
 } from "@idea-finder/core";
-import { createGitHubQuantitativeConnector, type QuantitativeConnector } from "@idea-finder/connectors";
+import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, GoogleTrendsSourceError, type GoogleTrendsTransport, type QuantitativeConnector } from "@idea-finder/connectors";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { openLocalStorage, type LocalStorage } from "@idea-finder/storage";
@@ -24,6 +27,10 @@ import type {
   MonitorDiff,
   MonitorSchedule,
   GitHubMetric,
+  GitHubMetricObservation,
+  GoogleTrendsMetricObservation,
+  GoogleTrendsNormalizationContext,
+  GoogleTrendsSeries,
   MetricObservation,
   Opportunity,
   RawSignal,
@@ -914,7 +921,8 @@ export class WorkspaceService {
         storage.transaction(() => {
           for (const observation of observations) storage.metricObservations.save(observation);
           for (const metric of [...new Set(observations.map((item) => item.metric))]) {
-            const all = storage.metricObservations.list({ subjectExternalId, metric });
+            const all = storage.metricObservations.list({ source: "github", subjectExternalId, metric })
+              .filter((item): item is GitHubMetricObservation => item.source === "github");
             const subjectKey = createHash("sha256").update(subjectExternalId).digest("hex").slice(0, 20);
             const built = buildTrendSeries(asId(`trend_github_${subjectKey}_${metric}`), all);
             storage.trendSeries.save(built.series);
@@ -962,6 +970,83 @@ export class WorkspaceService {
     }
   }
 
+  async collectGoogleTrends(input: {
+    subject: string;
+    geography: string;
+    from: string;
+    to: string;
+    granularity: "day" | "week";
+    category?: string;
+    property?: "web" | "news" | "images" | "youtube" | "shopping";
+    transport?: GoogleTrendsTransport;
+  }): Promise<{ context: GoogleTrendsNormalizationContext; observations: readonly GoogleTrendsMetricObservation[]; series: GoogleTrendsSeries; event: TrendEvent }> {
+    if (!input.subject.trim()) throw new Error("Google Trends subject must not be empty");
+    if (!/^(?:[A-Za-z]{2}|WORLDWIDE)$/.test(input.geography)) throw new Error("Google Trends geography must be an ISO-3166 alpha-2 code or WORLDWIDE");
+    if (Number.isNaN(Date.parse(input.from)) || Number.isNaN(Date.parse(input.to)) || Date.parse(input.from) >= Date.parse(input.to)) throw new Error("Google Trends requires a valid from < to window");
+    const sourceKey = [input.subject.trim().toLowerCase(), input.geography.toUpperCase(), input.from, input.to, input.granularity].join("|");
+    const statusId = `google_trends:${createHash("sha256").update(sourceKey).digest("hex").slice(0, 24)}`;
+    try {
+      const result = await createGoogleTrendsConnector({ transport: input.transport }).collect({ ...input, category: input.category ?? "all", property: input.property ?? "web" });
+      const canonicalWithoutId: Omit<GoogleTrendsNormalizationContext, "id"> = {
+        source: "google_trends",
+        method: "relative_interest_0_100_v1",
+        geography: result.normalizationContext.geography,
+        window: { startAt: result.normalizationContext.from, endAt: result.normalizationContext.to, resolution: result.normalizationContext.granularity, timezone: "UTC" },
+        comparisonSubjects: [...result.normalizationContext.comparisonSet],
+        anchor: result.normalizationContext.anchor,
+        category: result.normalizationContext.category,
+        property: result.normalizationContext.property,
+        scale: { min: 0, max: 100 },
+        includesPartialBucket: result.normalizationContext.containsPartialData,
+      };
+      const contextId = asId(`norm_${createHash("sha256").update(JSON.stringify(canonicalWithoutId)).digest("hex").slice(0, 24)}`);
+      const context: GoogleTrendsNormalizationContext = { id: contextId, ...canonicalWithoutId };
+      const subjectId = input.subject.trim();
+      const observations = result.observations.map((item) => createGoogleTrendsObservation({
+        id: asId(`metric_${createHash("sha256").update(`${context.id}|${subjectId}|${item.observedAt}`).digest("hex").slice(0, 24)}`),
+        subject: { kind: "search_term", externalId: subjectId, url: item.provenance.sourceRef },
+        context,
+        observedAt: item.observedAt,
+        rawValue: item.rawValue,
+        normalizedValue: item.normalizedValue,
+        partial: item.partial,
+        provenance: {
+          collector: item.provenance.transport,
+          collectorVersion: item.provenance.transportVersion,
+          interface: item.provenance.authorizedInterface === "authorized_api" ? "google_trends_authorized_api"
+            : item.provenance.authorizedInterface === "public_dataset" ? "google_trends_public_dataset" : "recorded_fixture",
+          sourceRef: item.provenance.sourceRef,
+          collectedAt: item.provenance.retrievedAt,
+        },
+      }));
+      const seriesId = asId(`trend_google_${createHash("sha256").update(`${context.id}|${subjectId}`).digest("hex").slice(0, 24)}`);
+      const built = buildGoogleTrendSeries(seriesId, context, observations);
+      const event = classifySearchMomentum(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: result.provenance.retrievedAt });
+      const storage = this.openCanonical();
+      try {
+        storage.transaction(() => {
+          storage.normalizationContexts.save(context);
+          for (const observation of observations) storage.metricObservations.save(observation);
+          storage.trendSeries.save(built.series);
+          storage.trendEvents.append(event);
+          storage.quantitativeSourceStatuses.save({ id: statusId, source: "google_trends", subjectExternalId: subjectId, status: "success", itemCount: observations.length, reason: null, checkedAt: result.provenance.retrievedAt, geography: context.geography, from: context.window.startAt, to: context.window.endAt, provenance: result.provenance });
+        });
+      } finally {
+        storage.close();
+      }
+      return { context, observations, series: built.series, event };
+    } catch (error) {
+      const status = error instanceof GoogleTrendsSourceError ? error.status : "response_drift";
+      const storage = this.openCanonical();
+      try {
+        storage.quantitativeSourceStatuses.save({ id: statusId, source: "google_trends", subjectExternalId: input.subject.trim(), status, itemCount: 0, reason: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString(), geography: input.geography, from: input.from, to: input.to, retryAt: error instanceof GoogleTrendsSourceError ? error.retryAt : null });
+      } finally {
+        storage.close();
+      }
+      throw error;
+    }
+  }
+
   listMetricObservations(subjectExternalId?: string, metric?: GitHubMetric): MetricObservation[] {
     const storage = this.openCanonical();
     try {
@@ -994,6 +1079,37 @@ export class WorkspaceService {
     const storage = this.openCanonical();
     try {
       return storage.quantitativeSourceStatuses.list();
+    } finally {
+      storage.close();
+    }
+  }
+
+  inspectGoogleTrends(input: { subject?: string; geography?: string; from?: string; to?: string } = {}): {
+    contexts: GoogleTrendsNormalizationContext[];
+    observations: GoogleTrendsMetricObservation[];
+    series: GoogleTrendsSeries[];
+    events: TrendEvent[];
+    sourceHealth: unknown[];
+  } {
+    const storage = this.openCanonical();
+    try {
+      const contexts = storage.normalizationContexts.list().filter((context) =>
+        (!input.geography || context.geography === input.geography.toUpperCase())
+        && (!input.from || context.window.startAt === new Date(input.from).toISOString())
+        && (!input.to || context.window.endAt === new Date(input.to).toISOString()),
+      );
+      const contextIds = new Set(contexts.map((context) => context.id));
+      const observations = storage.metricObservations.list({ source: "google_trends", subjectExternalId: input.subject, geography: input.geography?.toUpperCase() })
+        .filter((item): item is GoogleTrendsMetricObservation => item.source === "google_trends" && contextIds.has(item.normalizationContextId));
+      const series = storage.trendSeries.list({ source: "google_trends", subjectExternalId: input.subject, geography: input.geography?.toUpperCase() })
+        .filter((item): item is GoogleTrendsSeries => item.source === "google_trends" && contextIds.has(item.normalizationContextId));
+      return {
+        contexts,
+        observations,
+        series,
+        events: series.flatMap((item) => storage.trendEvents.listBySeries(item.id)),
+        sourceHealth: storage.quantitativeSourceStatuses.list().filter((status) => status.source === "google_trends" && (!input.subject || status.subjectExternalId === input.subject)),
+      };
     } finally {
       storage.close();
     }

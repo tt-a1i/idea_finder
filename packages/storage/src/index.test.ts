@@ -5,8 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
-import { asId } from "@idea-finder/core";
-import type { MetricObservation, ResearchRun, TrendEvent, TrendSeries } from "@idea-finder/core";
+import { asId, buildGoogleTrendSeries, classifySearchMomentum, createGoogleTrendsObservation } from "@idea-finder/core";
+import type { GoogleTrendsNormalizationContext, MetricObservation, ResearchRun, TrendEvent, TrendSeries } from "@idea-finder/core";
 
 import { openLocalStorage } from "./index.js";
 
@@ -386,6 +386,54 @@ describe("@idea-finder/storage local persistence", () => {
       })).toThrow("batch rollback");
       expect(storage.quantitativeSourceStatuses.get("batch-failure")).toBeNull();
       storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists isolated Google normalization contexts, series, and classifier events", () => {
+    const dataDir = tempDataDir();
+    const context = (id: string, geography: string): GoogleTrendsNormalizationContext => ({
+      id: asId(id), source: "google_trends", method: "relative_interest_0_100_v1", geography,
+      window: { startAt: "2026-07-01T00:00:00.000Z", endAt: "2026-07-31T00:00:00.000Z", resolution: "day", timezone: "UTC" },
+      comparisonSubjects: ["ai agent"], anchor: null, category: "0", property: "web", scale: { min: 0, max: 100 }, includesPartialBucket: false,
+    });
+    const us = context("norm_ai_us", "US");
+    const gb = context("norm_ai_gb", "GB");
+    const make = (normalization: GoogleTrendsNormalizationContext, index: number, value: number) => createGoogleTrendsObservation({
+      id: asId(`gobs_${normalization.geography}_${index}`),
+      subject: { kind: "search_term", externalId: "ai agent", url: "https://trends.google.com/trends/explore?q=ai%20agent" },
+      context: normalization, observedAt: `2026-07-0${index + 1}T00:00:00.000Z`, rawValue: value, normalizedValue: value,
+      provenance: { collector: "fixture", collectorVersion: "1", interface: "recorded_fixture", sourceRef: "fixture", collectedAt: "2026-07-11T00:00:00.000Z" },
+    });
+    try {
+      const storage = openLocalStorage({ dataDir });
+      storage.normalizationContexts.save(us);
+      storage.normalizationContexts.save(gb);
+      const usItems = [10, 12, 14, 20, 28, 40].map((value, index) => make(us, index, value));
+      const gbItem = make(gb, 0, 5);
+      for (const item of [...usItems, gbItem]) storage.metricObservations.save(item);
+      expect(storage.metricObservations.list({ source: "google_trends", geography: "US", normalizationContextId: us.id })).toEqual(usItems);
+      expect(storage.metricObservations.list({ source: "google_trends", geography: "GB", normalizationContextId: gb.id })).toEqual([gbItem]);
+      const built = buildGoogleTrendSeries(asId("gseries_ai_us"), us, usItems);
+      storage.trendSeries.save(built.series);
+      const event = classifySearchMomentum(built.series, new Map(usItems.map((item) => [item.id, item])), { detectedAt: "2026-07-11T00:00:00.000Z" });
+      storage.trendEvents.append(event);
+      expect(() => storage.metricObservations.save({ ...usItems[0]!, id: asId("gobs_bad_geo"), geography: "GB" })).toThrow("conflicts");
+      expect(() => storage.trendSeries.save({ ...built.series, id: asId("gseries_reversed"), observationIds: [...built.series.observationIds].reverse() })).toThrow("structure conflicts");
+      expect(() => storage.trendEvents.append({ ...event, id: asId("gevent_forged"), kind: "spike" })).toThrow("conflicts");
+      expect(() => storage.transaction(() => {
+        storage.normalizationContexts.save(context("norm_rollback", "CA"));
+        throw new Error("google rollback");
+      })).toThrow("google rollback");
+      expect(storage.normalizationContexts.get("norm_rollback")).toBeNull();
+      storage.close();
+
+      const restarted = openLocalStorage({ dataDir });
+      expect(restarted.normalizationContexts.list()).toEqual([gb, us]);
+      expect(restarted.trendSeries.list({ source: "google_trends", normalizationContextId: us.id })).toEqual([built.series]);
+      expect(restarted.trendEvents.listBySeries(built.series.id)).toEqual([event]);
+      restarted.close();
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }

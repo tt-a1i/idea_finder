@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
-import type { QuantitativeConnector } from "@idea-finder/connectors";
+import { GoogleTrendsSourceError, type GoogleTrendsTransport, type QuantitativeConnector } from "@idea-finder/connectors";
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
@@ -60,6 +60,8 @@ Usage:
   idea-finder monitor diff --brief <slug> --baseline <runId> --compare <runId>
   idea-finder monitor schedule <brief> --cadence <manual|daily|weekly> [--enabled <true|false>]
   idea-finder trends collect github <owner/repository> [--since <iso-time>] [--fixture]
+  idea-finder trends collect google <subject> --geo <CC|WORLDWIDE> --from <iso> --to <iso> [--granularity <day|week>] [--fixture] [--fixture-pattern <spike|seasonal|sustained|insufficient>]
+  idea-finder trends inspect google <subject> [--geo <CC|WORLDWIDE>] [--from <iso>] [--to <iso>]
   idea-finder trends observations [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends series [--subject <owner/repository>] [--metric <metric>]
   idea-finder trends events [--subject <owner/repository>] [--metric <metric>]
@@ -151,7 +153,8 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "validation complete": { valueFlags: ["--outcome", "--summary"], positionalCount: 3 },
   "monitor diff": { valueFlags: ["--brief", "--baseline", "--compare"], positionalCount: 2 },
   "monitor schedule": { valueFlags: ["--cadence", "--enabled"], positionalCount: 3 },
-  "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars"], booleanFlags: ["--fixture"], positionalCount: 4 },
+  "trends collect": { valueFlags: ["--since", "--api-base", "--fixture-time", "--fixture-stars", "--geo", "--from", "--to", "--granularity", "--fixture-pattern", "--fixture-failure"], booleanFlags: ["--fixture"], positionalCount: 4 },
+  "trends inspect": { valueFlags: ["--geo", "--from", "--to"], positionalCount: 4 },
   "trends observations": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends series": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
   "trends events": { valueFlags: ["--subject", "--metric"], positionalCount: 2 },
@@ -342,7 +345,45 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   }
 
   if (cmd === "trends" && sub === "collect") {
-    if (rest[0] !== "github") usageFailure("trends.source_required", "trends collect requires github <owner/repository>");
+    if (rest[0] === "google") {
+      const subject = required(rest[1], "trends.subject_required", "trends collect google requires <subject>");
+      const geography = required(flag(rest, "--geo"), "trends.geo_required", "Google Trends collection requires --geo");
+      if (!/^(?:[A-Za-z]{2}|WORLDWIDE)$/.test(geography)) throw new CliFailure("validation", "trends.geo_invalid", "--geo must be an ISO-3166 alpha-2 code or WORLDWIDE", CLI_EXIT_CODES.validation);
+      const from = required(flag(rest, "--from"), "trends.from_required", "Google Trends collection requires --from");
+      const to = required(flag(rest, "--to"), "trends.to_required", "Google Trends collection requires --to");
+      if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to)) || Date.parse(from) >= Date.parse(to)) throw new CliFailure("validation", "trends.window_invalid", "Google Trends requires a valid from < to window", CLI_EXIT_CODES.validation);
+      const granularity = oneOf(flag(rest, "--granularity") ?? "day", ["day", "week"] as const, "granularity");
+      const pattern = oneOf(flag(rest, "--fixture-pattern") ?? "sustained", ["spike", "seasonal", "sustained", "insufficient"] as const, "fixture-pattern");
+      const fixtureFailureRaw = flag(rest, "--fixture-failure");
+      const fixtureFailure = fixtureFailureRaw ? oneOf(fixtureFailureRaw, ["throttled", "unavailable", "response_drift"] as const, "fixture-failure") : undefined;
+      const fixtureValues = pattern === "spike" ? [10, 11, 9, 80, 15, 12]
+        : pattern === "seasonal" ? [10, 50, 20, 10, 50, 20]
+          : pattern === "insufficient" ? [10, 12, 14]
+            : [10, 15, 22, 35, 55, 80];
+      const fixtureTransport: GoogleTrendsTransport | undefined = has(rest, "--fixture") ? {
+        async query(request) {
+          if (fixtureFailure) throw new GoogleTrendsSourceError(fixtureFailure, `Recorded ${fixtureFailure} fixture`, fixtureFailure === "throttled" ? "2026-01-11T00:00:00.000Z" : null);
+          const start = Date.parse(request.from);
+          const step = request.granularity === "week" ? 7 * 86_400_000 : 86_400_000;
+          return {
+            payload: { rows: fixtureValues.map((value, index) => ({ time: new Date(start + index * step).toISOString(), value, partial: false })), comparisonSet: [request.subject], anchor: null },
+            provenance: { transport: "recorded-fixture", transportVersion: "1", authorizedInterface: "recorded_fixture", sourceRef: "fixture://google-trends", retrievedAt: request.to },
+          };
+        },
+      } : undefined;
+      const service = svc(workspaceDir);
+      try {
+        const result = await service.collectGoogleTrends({ subject, geography, from, to, granularity, transport: fixtureTransport });
+        return { command: "trends collect", data: { ...result, sourceHealth: service.inspectGoogleTrends({ subject }).sourceHealth }, human: `Collected ${result.observations.length} Google Trends observations for ${subject}/${geography}` };
+      } catch (error) {
+        if (error instanceof GoogleTrendsSourceError) {
+          const sourceHealth = service.inspectGoogleTrends({ subject }).sourceHealth;
+          throw new CliFailure(error.status === "authorization_required" ? "policy" : "partial-result", `google_trends.${error.status}`, error.message, error.status === "authorization_required" ? CLI_EXIT_CODES.policy : CLI_EXIT_CODES.partialResult, { sourceHealth, retryAt: error.retryAt });
+        }
+        throw error;
+      }
+    }
+    if (rest[0] !== "github") usageFailure("trends.source_required", "trends collect requires github or google");
     const subject = required(rest[1], "trends.subject_required", "trends collect github requires <owner/repository>");
     const since = flag(rest, "--since");
     if (since && Number.isNaN(Date.parse(since))) throw new CliFailure("validation", "trends.since_invalid", "--since must be an ISO date-time", CLI_EXIT_CODES.validation);
@@ -371,6 +412,13 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     } : undefined;
     const result = await svc(workspaceDir).collectGithubMetrics({ subject, since, apiBase: flag(rest, "--api-base"), connector: fixtureConnector });
     return { command: "trends collect", data: { ...result, sourceHealth: svc(workspaceDir).listQuantitativeSourceStatuses() }, human: `Collected ${result.observations.length} GitHub observations for ${subject}` };
+  }
+
+  if (cmd === "trends" && sub === "inspect") {
+    if (rest[0] !== "google") usageFailure("trends.source_required", "trends inspect requires google <subject>");
+    const subject = required(rest[1], "trends.subject_required", "trends inspect google requires <subject>");
+    const result = svc(workspaceDir).inspectGoogleTrends({ subject, geography: flag(rest, "--geo"), from: flag(rest, "--from"), to: flag(rest, "--to") });
+    return { command: "trends inspect", data: result, human: `Google Trends: ${result.observations.length} observations, ${result.events.length} events` };
   }
 
   if (cmd === "trends" && ["observations", "series", "events"].includes(sub ?? "")) {

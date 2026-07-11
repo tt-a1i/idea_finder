@@ -12,6 +12,8 @@ import type {
   TrendEvent,
   TrendSeries,
   GitHubMetric,
+  GoogleTrendsMetric,
+  GoogleTrendsNormalizationContext,
 } from "@idea-finder/core";
 
 export interface ResearchRunRepository {
@@ -46,8 +48,17 @@ export interface CalibrationEventRepository {
 }
 
 export interface QuantitativeListFilter {
+  readonly source?: MetricObservation["source"];
   readonly subjectExternalId?: string;
-  readonly metric?: GitHubMetric;
+  readonly metric?: GitHubMetric | GoogleTrendsMetric;
+  readonly geography?: string;
+  readonly normalizationContextId?: string;
+}
+
+export interface NormalizationContextRepository {
+  save(context: GoogleTrendsNormalizationContext): void;
+  get(id: string): GoogleTrendsNormalizationContext | null;
+  list(): GoogleTrendsNormalizationContext[];
 }
 
 export interface MetricObservationRepository {

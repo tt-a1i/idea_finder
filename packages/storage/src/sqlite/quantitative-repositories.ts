@@ -1,16 +1,28 @@
-import type { DatabaseSync, StatementSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
 import {
   buildTrendSeries,
+  buildGoogleTrendSeries,
+  classifySearchMomentum,
   classifyGitHubMetric,
+  createGoogleTrendsObservation,
   createGitHubMetricObservation,
   detectLatestTrendEvent,
+  validateGoogleTrendsNormalizationContext,
+  type DeltaTrendEvent,
+  type GitHubMetricObservation,
+  type GitHubTrendSeries,
+  type GoogleTrendsMetricObservation,
+  type GoogleTrendsNormalizationContext,
+  type GoogleTrendsSeries,
+  type SearchMomentumTrendEvent,
   type MetricObservation,
   type TrendEvent,
   type TrendSeries,
 } from "@idea-finder/core";
 import type {
   MetricObservationRepository,
+  NormalizationContextRepository,
   QuantitativeListFilter,
   TrendEventRepository,
   TrendSeriesRepository,
@@ -28,27 +40,22 @@ function assertIdempotent<T>(existing: T | null, incoming: T, label: string): vo
 
 function assertValidObservation(observation: MetricObservation): void {
   if (!observation.id.trim()) throw new Error("MetricObservation id is required");
-  if (observation.source !== "github" || observation.subject.kind !== "repository") {
-    throw new Error(`MetricObservation ${observation.id} must describe a GitHub repository`);
-  }
-  if (classifyGitHubMetric(observation.metric) !== observation.lane) {
-    throw new Error(`MetricObservation ${observation.id} lane conflicts with its metric`);
-  }
-  const validated = createGitHubMetricObservation({
-    id: observation.id,
-    subject: observation.subject,
-    metric: observation.metric,
-    geography: observation.geography,
-    observedAt: observation.observedAt,
-    rawValue: observation.rawValue,
-    normalizedValue: observation.normalizedValue,
-    provenance: observation.provenance,
-  });
-  if (
-    validated.unit !== observation.unit ||
-    validated.collectionMethod !== observation.collectionMethod
-  ) {
-    throw new Error(`MetricObservation ${observation.id} derived fields conflict with canonical values`);
+  if (observation.source === "github") {
+    if (observation.subject.kind !== "repository") {
+      throw new Error(`MetricObservation ${observation.id} must describe a GitHub repository`);
+    }
+    if (classifyGitHubMetric(observation.metric) !== observation.lane) {
+      throw new Error(`MetricObservation ${observation.id} lane conflicts with its metric`);
+    }
+    const validated = createGitHubMetricObservation({
+      id: observation.id, subject: observation.subject, metric: observation.metric,
+      geography: observation.geography, observedAt: observation.observedAt,
+      rawValue: observation.rawValue, normalizedValue: observation.normalizedValue,
+      provenance: observation.provenance,
+    });
+    if (validated.unit !== observation.unit || validated.collectionMethod !== observation.collectionMethod) {
+      throw new Error(`MetricObservation ${observation.id} derived fields conflict with canonical values`);
+    }
   }
 }
 
@@ -57,60 +64,84 @@ function sameSubject(left: MetricObservation["subject"], right: TrendSeries["sub
 }
 
 function listQuantitative<T>(
-  statements: { all: StatementSync; subject: StatementSync; metric: StatementSync; both: StatementSync },
+  db: DatabaseSync,
+  table: "metric_observations" | "trend_series",
   filter: QuantitativeListFilter = {},
 ): T[] {
-  const rows = filter.subjectExternalId && filter.metric
-    ? statements.both.all(filter.subjectExternalId, filter.metric)
-    : filter.subjectExternalId
-      ? statements.subject.all(filter.subjectExternalId)
-      : filter.metric
-        ? statements.metric.all(filter.metric)
-        : statements.all.all();
+  const clauses: string[] = [];
+  const values: string[] = [];
+  for (const [column, value] of [
+    ["source", filter.source], ["subject_external_id", filter.subjectExternalId],
+    ["metric", filter.metric], ["geography", filter.geography],
+    ["normalization_context_id", filter.normalizationContextId],
+  ] as const) {
+    if (value !== undefined) { clauses.push(`${column} = ?`); values.push(value); }
+  }
+  const order = table === "metric_observations" ? "observed_at, id" : "id";
+  const rows = db.prepare(`SELECT payload_json FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${order}`).all(...values);
   return (rows as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as T);
+}
+
+export function createNormalizationContextRepository(db: DatabaseSync): NormalizationContextRepository {
+  const insert = db.prepare("INSERT INTO normalization_contexts (id, source, geography, payload_json) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING");
+  const get = db.prepare("SELECT payload_json FROM normalization_contexts WHERE id = ?");
+  const list = db.prepare("SELECT payload_json FROM normalization_contexts ORDER BY id");
+  return {
+    save(context) {
+      validateGoogleTrendsNormalizationContext(context);
+      insert.run(context.id, context.source, context.geography, JSON.stringify(context));
+      assertIdempotent(parse(get.get(context.id) as { payload_json: string } | undefined), context, `NormalizationContext ${context.id}`);
+    },
+    get(id) { return parse(get.get(id) as { payload_json: string } | undefined); },
+    list() { return (list.all() as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as GoogleTrendsNormalizationContext); },
+  };
 }
 
 export function createMetricObservationRepository(db: DatabaseSync): MetricObservationRepository {
   const insert = db.prepare(`INSERT INTO metric_observations
-    (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
   const get = db.prepare("SELECT payload_json FROM metric_observations WHERE id = ?");
   const getIdentity = db.prepare(`SELECT payload_json FROM metric_observations
-    WHERE source = ? AND subject_kind = ? AND subject_external_id = ? AND metric = ? AND observed_at = ? AND collection_method = ?`);
-  const lists = {
-    all: db.prepare("SELECT payload_json FROM metric_observations ORDER BY observed_at, id"),
-    subject: db.prepare("SELECT payload_json FROM metric_observations WHERE subject_external_id = ? ORDER BY observed_at, id"),
-    metric: db.prepare("SELECT payload_json FROM metric_observations WHERE metric = ? ORDER BY observed_at, id"),
-    both: db.prepare("SELECT payload_json FROM metric_observations WHERE subject_external_id = ? AND metric = ? ORDER BY observed_at, id"),
-  };
+    WHERE source = ? AND subject_kind = ? AND subject_external_id = ? AND metric = ? AND observed_at = ? AND collection_method = ? AND geography = ? AND normalization_context_id = ?`);
+  const getContext = db.prepare("SELECT payload_json FROM normalization_contexts WHERE id = ?");
   return {
     save(observation) {
       assertValidObservation(observation);
+      const contextId = observation.source === "google_trends" ? observation.normalizationContextId : "";
+      const geography = observation.geography ?? "";
+      if (observation.source === "google_trends") {
+        const context = parse<GoogleTrendsNormalizationContext>(getContext.get(contextId) as { payload_json: string } | undefined);
+        if (!context) throw new Error(`MetricObservation ${observation.id} references missing NormalizationContext ${contextId}`);
+        const canonical = createGoogleTrendsObservation({
+          id: observation.id, subject: observation.subject, context,
+          observedAt: observation.observedAt, rawValue: observation.rawValue,
+          normalizedValue: observation.normalizedValue, partial: observation.partial,
+          provenance: observation.provenance,
+        });
+        assertIdempotent(canonical, observation, `MetricObservation ${observation.id}`);
+      }
       insert.run(observation.id, observation.source, observation.subject.kind, observation.subject.externalId,
-        observation.metric, observation.observedAt, observation.collectionMethod, JSON.stringify(observation));
+        observation.metric, observation.observedAt, observation.collectionMethod, geography, contextId, JSON.stringify(observation));
       const byId = parse<MetricObservation>(get.get(observation.id) as { payload_json: string } | undefined);
       const byIdentity = parse<MetricObservation>(getIdentity.get(observation.source, observation.subject.kind,
-        observation.subject.externalId, observation.metric, observation.observedAt, observation.collectionMethod) as { payload_json: string } | undefined);
+        observation.subject.externalId, observation.metric, observation.observedAt, observation.collectionMethod, geography, contextId) as { payload_json: string } | undefined);
       assertIdempotent(byId, observation, `MetricObservation ${observation.id}`);
       assertIdempotent(byIdentity, observation, `MetricObservation identity ${observation.subject.externalId}/${observation.metric}/${observation.observedAt}`);
     },
     get(id) { return parse(get.get(id) as { payload_json: string } | undefined); },
-    list(filter) { return listQuantitative(lists, filter); },
+    list(filter) { return listQuantitative(db, "metric_observations", filter); },
   };
 }
 
 export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesRepository {
-  const upsert = db.prepare(`INSERT INTO trend_series (id, source, subject_external_id, metric, payload_json)
-    VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,
-    subject_external_id=excluded.subject_external_id, metric=excluded.metric, payload_json=excluded.payload_json`);
+  const upsert = db.prepare(`INSERT INTO trend_series (id, source, subject_external_id, metric, geography, normalization_context_id, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,
+    subject_external_id=excluded.subject_external_id, metric=excluded.metric, geography=excluded.geography,
+    normalization_context_id=excluded.normalization_context_id, payload_json=excluded.payload_json`);
   const get = db.prepare("SELECT payload_json FROM trend_series WHERE id = ?");
   const getObservation = db.prepare("SELECT payload_json FROM metric_observations WHERE id = ?");
-  const lists = {
-    all: db.prepare("SELECT payload_json FROM trend_series ORDER BY id"),
-    subject: db.prepare("SELECT payload_json FROM trend_series WHERE subject_external_id = ? ORDER BY id"),
-    metric: db.prepare("SELECT payload_json FROM trend_series WHERE metric = ? ORDER BY id"),
-    both: db.prepare("SELECT payload_json FROM trend_series WHERE subject_external_id = ? AND metric = ? ORDER BY id"),
-  };
+  const getContext = db.prepare("SELECT payload_json FROM normalization_contexts WHERE id = ?");
   return {
     save(series) {
       const observations: MetricObservation[] = [];
@@ -129,13 +160,28 @@ export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesReposi
         }
         observations.push(observation);
       }
-      const canonical = buildTrendSeries(series.id, observations).series;
+      const canonical = series.source === "google_trends"
+        ? buildGoogleTrendSeries(
+          series.id,
+          (() => {
+            const context = parse<GoogleTrendsNormalizationContext>(getContext.get(series.normalizationContextId) as { payload_json: string } | undefined);
+            if (!context) throw new Error(`TrendSeries ${series.id} references missing NormalizationContext ${series.normalizationContextId}`);
+            return context;
+          })(),
+          observations as GoogleTrendsMetricObservation[],
+        ).series
+        : buildTrendSeries(series.id, observations as GitHubMetricObservation[]).series;
       if (
         canonical.id !== series.id ||
         canonical.source !== series.source ||
         !sameSubject(canonical.subject, series.subject) ||
         canonical.metric !== series.metric ||
         canonical.lane !== series.lane ||
+        (canonical.source === "google_trends" && series.source === "google_trends" && (
+          canonical.geography !== series.geography ||
+          canonical.normalizationContextId !== series.normalizationContextId ||
+          JSON.stringify(canonical.window) !== JSON.stringify(series.window)
+        )) ||
         canonical.startedAt !== series.startedAt ||
         canonical.endedAt !== series.endedAt ||
         canonical.observationIds.length !== series.observationIds.length ||
@@ -149,10 +195,13 @@ export function createTrendSeriesRepository(db: DatabaseSync): TrendSeriesReposi
         || existing.metric !== series.metric || existing.lane !== series.lane)) {
         throw new Error(`TrendSeries ${series.id} identity conflicts with canonical SQLite state`);
       }
-      upsert.run(series.id, series.source, series.subject.externalId, series.metric, JSON.stringify(series));
+      upsert.run(series.id, series.source, series.subject.externalId, series.metric,
+        series.source === "google_trends" ? series.geography : "",
+        series.source === "google_trends" ? series.normalizationContextId : "",
+        JSON.stringify(series));
     },
     get(id) { return parse(get.get(id) as { payload_json: string } | undefined); },
-    list(filter) { return listQuantitative(lists, filter); },
+    list(filter) { return listQuantitative(db, "trend_series", filter); },
   };
 }
 
@@ -166,6 +215,24 @@ export function createTrendEventRepository(db: DatabaseSync): TrendEventReposito
     append(event) {
       const series = parse<TrendSeries>(getSeries.get(event.seriesId) as { payload_json: string } | undefined);
       if (!series) throw new Error(`TrendEvent ${event.id} references missing TrendSeries ${event.seriesId}`);
+      if (event.detector === "search_momentum_v1") {
+        if (series.source !== "google_trends") throw new Error(`TrendEvent ${event.id} requires a Google Trends series`);
+        const observations = new Map(
+          series.observationIds.map((id) => {
+            const observation = parse<MetricObservation>(getObservation.get(id) as { payload_json: string } | undefined);
+            if (!observation || observation.source !== "google_trends") {
+              throw new Error(`TrendEvent ${event.id} references missing Google Trends observation ${id}`);
+            }
+            return [id, observation] as const;
+          }),
+        );
+        const expected = classifySearchMomentum(series, observations, { detectedAt: event.detectedAt, rules: event.rules });
+        assertIdempotent(expected, event, `TrendEvent ${event.id}`);
+        insert.run(event.id, event.seriesId, event.detectedAt, JSON.stringify(event));
+        assertIdempotent(parse(get.get(event.id) as { payload_json: string } | undefined), event, `TrendEvent ${event.id}`);
+        return;
+      }
+      if (series.source !== "github") throw new Error(`TrendEvent ${event.id} requires a GitHub series`);
       if (!series.observationIds.includes(event.previousObservationId) || !series.observationIds.includes(event.currentObservationId)) {
         throw new Error(`TrendEvent ${event.id} references observations outside TrendSeries ${event.seriesId}`);
       }
@@ -181,7 +248,7 @@ export function createTrendEventRepository(db: DatabaseSync): TrendEventReposito
       }
       const expected = detectLatestTrendEvent(
         { ...series, observationIds: [previous.id, current.id] },
-        new Map([[previous.id, previous], [current.id, current]]),
+        new Map([[previous.id, previous as GitHubMetricObservation], [current.id, current as GitHubMetricObservation]]),
         { detectedAt: event.detectedAt, stableRelativeThreshold: 0 },
       );
       if (!expected ||

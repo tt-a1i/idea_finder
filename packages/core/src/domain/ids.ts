@@ -17,6 +17,7 @@ export type MonitorScheduleId = EntityId;
 export type MetricObservationId = EntityId;
 export type TrendSeriesId = EntityId;
 export type TrendEventId = EntityId;
+export type NormalizationContextId = EntityId;
 
 export function asId<T extends EntityId>(value: string): T {
   return value as T;

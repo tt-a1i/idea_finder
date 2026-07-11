@@ -2,13 +2,13 @@ import { asId } from "./ids.js";
 import type { MetricObservationId, TrendEventId, TrendSeriesId } from "./ids.js";
 import type {
   GitHubMetric,
-  MetricObservation,
+  GitHubMetricObservation,
+  GitHubTrendSeries,
   MetricObservationProvenance,
   MetricSubject,
   QuantitativeEvidenceLane,
   TrendEvent,
   TrendEventKind,
-  TrendSeries,
 } from "./types.js";
 import { InvariantViolation } from "./validation.js";
 
@@ -67,7 +67,7 @@ export interface CreateGitHubMetricObservationInput {
 /** Creates quantitative GitHub evidence; callers cannot relabel popularity as demand. */
 export function createGitHubMetricObservation(
   input: CreateGitHubMetricObservationInput,
-): MetricObservation {
+): GitHubMetricObservation {
   if (!input.subject.externalId.trim() || !input.subject.url.trim()) {
     throw new InvariantViolation("metric.subject_required", "Metric subject id and URL are required");
   }
@@ -93,7 +93,7 @@ export function createGitHubMetricObservation(
   };
 }
 
-function observationIdentity(observation: MetricObservation): string {
+function observationIdentity(observation: GitHubMetricObservation): string {
   return [
     observation.source,
     subjectKey(observation.subject),
@@ -105,14 +105,14 @@ function observationIdentity(observation: MetricObservation): string {
 
 export function buildTrendSeries(
   id: TrendSeriesId,
-  observations: readonly MetricObservation[],
-): { readonly series: TrendSeries; readonly observations: readonly MetricObservation[] } {
+  observations: readonly GitHubMetricObservation[],
+): { readonly series: GitHubTrendSeries; readonly observations: readonly GitHubMetricObservation[] } {
   if (observations.length === 0) {
     throw new InvariantViolation("trend.empty_series", "TrendSeries requires observations");
   }
   const first = observations[0]!;
   const expectedSubject = subjectKey(first.subject);
-  const unique = new Map<string, MetricObservation>();
+  const unique = new Map<string, GitHubMetricObservation>();
   for (const observation of observations) {
     if (
       observation.source !== first.source ||
@@ -159,8 +159,8 @@ export interface DetectTrendEventOptions {
 }
 
 export function detectLatestTrendEvent(
-  series: TrendSeries,
-  observationsById: ReadonlyMap<MetricObservationId, MetricObservation>,
+  series: GitHubTrendSeries,
+  observationsById: ReadonlyMap<MetricObservationId, GitHubMetricObservation>,
   options: DetectTrendEventOptions,
 ): TrendEvent | null {
   if (series.observationIds.length < 2) return null;

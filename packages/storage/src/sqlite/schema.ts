@@ -70,8 +70,10 @@ CREATE TABLE IF NOT EXISTS metric_observations (
   metric TEXT NOT NULL,
   observed_at TEXT NOT NULL,
   collection_method TEXT NOT NULL,
+  geography TEXT NOT NULL DEFAULT '',
+  normalization_context_id TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL,
-  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method)
+  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id)
 );
 CREATE INDEX IF NOT EXISTS idx_metric_observations_subject_metric
   ON metric_observations (subject_external_id, metric, observed_at);
@@ -81,6 +83,8 @@ CREATE TABLE IF NOT EXISTS trend_series (
   source TEXT NOT NULL,
   subject_external_id TEXT NOT NULL,
   metric TEXT NOT NULL,
+  geography TEXT NOT NULL DEFAULT '',
+  normalization_context_id TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trend_series_subject_metric
@@ -97,6 +101,13 @@ CREATE INDEX IF NOT EXISTS idx_trend_events_series
 
 CREATE TABLE IF NOT EXISTS quantitative_source_statuses (
   id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS normalization_contexts (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  geography TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
 
@@ -256,6 +267,44 @@ export function initSchema(db: DatabaseSync): void {
         throw error;
       }
     }
+  }
+  const quantitativeColumns = db.prepare("PRAGMA table_info(metric_observations)").all() as Array<{ name: string }>;
+  if (quantitativeColumns.length > 0 && !quantitativeColumns.some((column) => column.name === "normalization_context_id")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE metric_observations RENAME TO metric_observations_github_v1;
+        CREATE TABLE metric_observations (
+          id TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          subject_kind TEXT NOT NULL,
+          subject_external_id TEXT NOT NULL,
+          metric TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          collection_method TEXT NOT NULL,
+          geography TEXT NOT NULL DEFAULT '',
+          normalization_context_id TEXT NOT NULL DEFAULT '',
+          payload_json TEXT NOT NULL,
+          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id)
+        );
+        INSERT INTO metric_observations
+          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, payload_json)
+        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, '', '', payload_json
+        FROM metric_observations_github_v1;
+        DROP TABLE metric_observations_github_v1;
+        DROP INDEX IF EXISTS idx_metric_observations_subject_metric;
+        CREATE INDEX idx_metric_observations_subject_metric
+          ON metric_observations (subject_external_id, metric, observed_at);
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  const seriesColumns = db.prepare("PRAGMA table_info(trend_series)").all() as Array<{ name: string }>;
+  if (seriesColumns.length > 0 && !seriesColumns.some((column) => column.name === "normalization_context_id")) {
+    db.exec("ALTER TABLE trend_series ADD COLUMN geography TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN normalization_context_id TEXT NOT NULL DEFAULT '';");
   }
   db.exec(SCHEMA_SQL);
 }
