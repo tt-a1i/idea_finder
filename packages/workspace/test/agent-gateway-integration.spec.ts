@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { CLI_EXIT_CODES } from "../src/cli/contract.js";
 import { runCli } from "../src/cli/main.js";
 import { resolveWorkspacePaths } from "../src/storage/workspace-store.js";
 import { WorkspaceService } from "../src/workspace-service.js";
@@ -104,7 +105,7 @@ describe("agent gateway workspace integration", () => {
       ?.split(" ")[3];
     expect(taskId).toBeTruthy();
 
-    expect(await runCli(["agent", "run", taskId!], cliOpts)).toBe(1);
+    expect(await runCli(["agent", "run", taskId!], cliOpts)).toBe(CLI_EXIT_CODES.policy);
     expect(lines.some((l) => l.includes("blocked"))).toBe(true);
     expect(
       errors.some((l) => l.includes("policy.domain_write_forbidden")),

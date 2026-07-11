@@ -2,12 +2,19 @@
 
 Command-line workflow for the personal demand workspace (Wave 2 vertical slice). No web UI, no auth, no live LLM.
 
-## Setup
+## Install the standalone CLI
 
 ```bash
 npm install
 npm run build
+npm pack
+npm install -g ./idea-finder-0.0.0.tgz
+idea-finder workspace diagnostics --json
 ```
+
+The packed root package contains a bundled `idea-finder` executable and does not
+require this repository or its npm scripts at runtime. During repository
+development, `npm link` exposes the same executable.
 
 ## Usage
 
@@ -17,6 +24,10 @@ Default workspace directory: `data/workspace/` (gitignored).
 # Create and list hunting briefs (stored as JSON under data/workspace/briefs/)
 npm run cli -- brief create invoicing --title "Solo SaaS invoicing" --description "Stripe-sync pain"
 npm run cli -- brief list
+
+# Direct executable after install/link
+idea-finder brief list
+idea-finder workspace diagnostics
 
 # Run research — fixture mode (default, offline invoicing fixture)
 npm run cli -- run invoicing
@@ -38,6 +49,28 @@ npm run cli -- export invoicing --out reports/invoicing.md
 ```
 
 Use `--workspace <dir>` on any command for an alternate data root (useful in tests).
+
+## Machine contract
+
+Every implemented command accepts `--json` (or `--format json`) and emits exactly
+one JSON object on stdout. Version `1.0` pins these fields:
+
+```json
+{
+  "contractVersion": "1.0",
+  "command": "brief list",
+  "status": "success",
+  "data": { "briefs": [] },
+  "warnings": [],
+  "incompleteness": { "incomplete": false, "reasons": [] },
+  "errors": []
+}
+```
+
+Machine mode never depends on human-readable lines. Stable failure categories and
+exit codes are: `usage` (2), `validation` (3), `missing-resource` (4), `policy`
+(5), `partial-result` (6), and `internal` (7). Success exits 0. Structured errors
+contain `category`, `code`, `message`, and nullable `details`.
 
 ## Orchestration mode
 
