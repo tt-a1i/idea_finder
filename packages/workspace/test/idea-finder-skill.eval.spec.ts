@@ -104,6 +104,7 @@ describe("idea-finder companion Skill evaluations", () => {
     expect(skill).toContain("Never treat agent reasoning, examples, fixtures, or test prompts as real evidence");
     expect(skill).toContain("do not call `--manual-import` to fill the gap");
     expect(skill).toContain("same user turn do not count as multiple independent sources");
+    expect(skill).toContain("cannot alone satisfy cross-source Library admission");
     const workflows = await readFile(path.join(skillRoot, "references", "cli-workflows.md"), "utf8");
     expect(workflows).toMatch(/user-provided verbatim/i);
     expect(workflows).toMatch(/deterministic test fixture/i);

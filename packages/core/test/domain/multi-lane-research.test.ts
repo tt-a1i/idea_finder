@@ -41,7 +41,12 @@ function qualitativeFixture(contents: readonly string[]) {
     confidence: "medium", confidenceReasons: ["qualitative"], llmModel: "fixture", promptVersion: "1",
     provenance: { createdBy: "pipeline" },
   };
-  const independence = buildExactDuplicateIndependenceIndex(contents.map((content, index) => ({ documentId: asId(`doc_${index}`), content })));
+  const independence = buildExactDuplicateIndependenceIndex(contents.map((content, index) => ({
+    documentId: asId(`doc_${index}`),
+    content,
+    platform: `source_${index}`,
+    url: `https://example.test/${index}`,
+  })));
   return {
     chunks, signals, evidence, draft, independence,
     evidenceById: new Map(evidence.map((item) => [item.id, item])),
@@ -112,7 +117,12 @@ describe("multi-lane research domain", () => {
     });
     expect(promoted.opportunity.status).toBe("promoted");
 
-    const duplicateContext = buildExactDuplicateIndependenceIndex(fixture.chunks.map((chunk) => ({ documentId: chunk.documentId, content: "same syndicated copy" })));
+    const duplicateContext = buildExactDuplicateIndependenceIndex(fixture.chunks.map((chunk) => ({
+      documentId: chunk.documentId,
+      content: "same syndicated copy",
+      platform: "hn",
+      url: `https://example.test/${chunk.documentId}`,
+    })));
     expect(() => applyCalibration(opportunity, "promote", "syndicated", "user", undefined, {
       evidenceById: fixture.evidenceById, chunksById: fixture.chunksById, signalsById: fixture.signalsById,
       corroborationContext: duplicateContext,
@@ -130,5 +140,73 @@ describe("multi-lane research domain", () => {
     });
     expect(proposal).not.toHaveProperty("opportunityId");
     expect(proposeFollowUpHuntingTask({ triggerEventId: asId("event_spike"), triggerSeriesId: asId("series_search"), triggerKind: "spike", subject: "agent coding" }).id).toBe(proposal.id);
+  });
+
+  it("collapses distinct manual imports without explicit provenance into one independence group", () => {
+    const texts = [
+      "Standup notes get lost between coding agents every Monday.",
+      "We paste the same handoff workaround into Slack each week.",
+      "Would pay for a durable agent coordination inbox.",
+    ];
+    const independence = buildExactDuplicateIndependenceIndex(texts.map((content, index) => ({
+      documentId: asId(`doc_manual_${index}`),
+      content,
+      platform: "manual",
+      url: `manual://import/hash${index}`,
+    })));
+    expect(new Set(independence.records.map((item) => item.independenceGroupId)).size).toBe(1);
+    expect(independence.records.filter((item) => item.relation === "same_provenance")).toHaveLength(2);
+    expect(independence.records.some((item) => item.basis === "manual_shared_provenance_v1")).toBe(true);
+
+    const evidence = texts.map((content, index): EvidenceItem => ({
+      id: asId(`evidence_manual_${index}`), clusterId: asId("cluster_manual"), opportunityId: null,
+      rawSignalId: asId(`signal_manual_${index}`), documentId: asId(`doc_manual_${index}`), chunkId: asId(`chunk_manual_${index}`),
+      platform: "manual", url: `manual://import/hash${index}`, linkStatus: "ok",
+      quoteVerbatim: content, supportsClaim: "pain", strength: "primary", userVerified: true,
+      provenance: { createdBy: "pipeline", agentRunId: null }, fetchedAt: "2026-07-11T00:00:00.000Z",
+    }));
+    const draft: OpportunityDraft = {
+      id: asId("draft_manual_only"), clusterId: asId("cluster_manual"), demandStatement: "Agent coordination is painful",
+      persona: "teams", scenario: "handoff", evidenceItemIds: evidence.map((item) => item.id), disconfirmingSignalIds: [],
+      pseudoDemandRisks: [], scoreVector: { frequency: 1, crossSource: 1, recency: 1, wtpStrength: 1, workaroundDepth: 1 },
+      confidence: "medium", confidenceReasons: ["manual"], llmModel: "fixture", promptVersion: "1",
+      provenance: { createdBy: "pipeline" },
+    };
+    const admission = admitToLibrary(
+      [draft],
+      new Map(evidence.map((item) => [item.id, item])),
+      new Map(texts.map((content, index) => [asId(`chunk_manual_${index}`), {
+        id: asId(`chunk_manual_${index}`), documentId: asId(`doc_manual_${index}`), text: content, spanStart: 0, spanEnd: content.length,
+      }])),
+      new Map(texts.map((content, index) => [asId(`signal_manual_${index}`), {
+        id: asId(`signal_manual_${index}`), chunkId: asId(`chunk_manual_${index}`), documentId: asId(`doc_manual_${index}`),
+        signalType: "pain", signalSubtype: "manual", quoteVerbatim: content, quoteHash: `hash_${index}`,
+        spanStart: 0, spanEnd: content.length, confidenceRule: 1, detector: "rule_v1", detectorVersion: "1",
+        extractedAt: "2026-07-11T00:00:00.000Z",
+      }])),
+      independence,
+    );
+    expect(admission.admitted).toEqual([]);
+    expect(admission.rejected[0]?.issues.map((issue) => issue.code)).toContain("opportunity.insufficient_evidence");
+  });
+
+  it("keeps manual imports with distinct explicit URLs as independent source groups", () => {
+    const independence = buildExactDuplicateIndependenceIndex([
+      { documentId: asId("doc_a"), content: "Interview note A about painful handoffs", platform: "manual", url: "https://notes.example/a" },
+      { documentId: asId("doc_b"), content: "Interview note B about weekly workarounds", platform: "manual", url: "https://notes.example/b" },
+      { documentId: asId("doc_c"), content: "Interview note C about willingness to pay", platform: "manual", url: "https://notes.example/c" },
+    ]);
+    expect(new Set(independence.records.map((item) => item.independenceGroupId)).size).toBe(3);
+  });
+
+  it("merges provenance-less manuals without collapsing independent public sources", () => {
+    const independence = buildExactDuplicateIndependenceIndex([
+      { documentId: asId("doc_m1"), content: "Manual note one about agent pain", platform: "manual", url: "manual://import/aaa" },
+      { documentId: asId("doc_m2"), content: "Manual note two about agent pain", platform: "manual", url: "manual://import/bbb" },
+      { documentId: asId("doc_hn"), content: "HN thread about agent coding coordination", platform: "hn", url: "https://news.ycombinator.com/item?id=1" },
+    ]);
+    expect(new Set(independence.records.map((item) => item.independenceGroupId)).size).toBe(2);
+    const manualGroups = independence.records.filter((item) => String(item.documentId).startsWith("doc_m"));
+    expect(new Set(manualGroups.map((item) => item.independenceGroupId)).size).toBe(1);
   });
 });

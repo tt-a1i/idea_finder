@@ -57,15 +57,19 @@ export interface ApiServer {
 const DEFAULT_MANUAL_IMPORTS = [
   {
     text: "I invoice from a Google Sheet every month — painful workaround reconciling Stripe payouts.",
+    url: "https://interviews.example/sheet-workaround",
   },
   {
     text: "Would pay $30/mo for lightweight solo SaaS invoicing with Stripe sync.",
+    url: "https://interviews.example/wtp",
   },
   {
-    text: "Need something simpler than QuickBooks for month-end invoicing.",
+    text: "Month-end Stripe reconciliation is painfully broken and I need a simpler invoicing workflow.",
+    url: "https://interviews.example/simpler-tool",
   },
   {
     text: "QuickBooks works fine for enterprise — not a problem for us.",
+    url: "https://interviews.example/disconfirming",
   },
 ] as const;
 

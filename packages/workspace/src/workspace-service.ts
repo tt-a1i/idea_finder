@@ -1254,7 +1254,12 @@ export class WorkspaceService {
     const fixture = options.fixtureSet !== undefined;
     const plan = brief.queryPlan?.quantitative ?? {};
 
-    const independence = buildExactDuplicateIndependenceIndex(stored.documents.map((document) => ({ documentId: document.id, content: document.rawBody })));
+    const independence = buildExactDuplicateIndependenceIndex(stored.documents.map((document) => ({
+      documentId: document.id,
+      content: document.rawBody,
+      platform: document.platform,
+      url: document.url,
+    })));
     const groupByDocument = independence.independenceGroupByDocumentId;
     const admission = admitToLibrary(
       stored.drafts,

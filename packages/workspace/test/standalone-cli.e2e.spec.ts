@@ -500,6 +500,29 @@ describe("installed standalone CLI", () => {
     expect(human.stdout).toContain("conclusions remain conditional");
   });
 
+  it("rejects cross-source admission when only provenance-less manual imports are present", async () => {
+    const created = await invoke(executable, [
+      "brief", "create", "manual-only", "--title", "Manual only",
+      "--manual-import", "Standup notes get lost between coding agents every Monday.",
+      "--manual-import", "We paste the same handoff workaround into Slack each week.",
+      "--manual-import", "Would pay for a durable agent coordination inbox.",
+      "--workspace", workspace, "--json",
+    ], consumer);
+    expect(created.code).toBe(0);
+    const researched = await invoke(executable, ["run", "manual-only", "--workspace", workspace, "--json"], consumer);
+    expect(researched.code).toBe(0);
+    const result = researched.envelope.data as {
+      documents: unknown[];
+      admittedCount: number;
+      rejected: Array<{ issues: Array<{ code: string }> }>;
+      evidence: unknown[];
+    };
+    expect(result.documents).toHaveLength(3);
+    expect(result.evidence.length).toBeGreaterThanOrEqual(1);
+    expect(result.admittedCount).toBe(0);
+    expect(result.rejected.some((entry) => entry.issues.some((issue) => issue.code === "opportunity.insufficient_evidence"))).toBe(true);
+  });
+
   it("restarts from canonical SQLite and inspects admitted and rejected Library results", async () => {
     const created = await invoke(executable, [
       "brief", "create", "canonical", "--title", "Canonical research",
@@ -511,7 +534,9 @@ describe("installed standalone CLI", () => {
       "--workspace", workspace, "--json",
     ], consumer);
     expect(created.code).toBe(0);
-    const researched = await invoke(executable, ["run", "canonical", "--workspace", workspace, "--json"], consumer);
+    // Fixture admission remains available for Library/restart coverage; live manual-only
+    // cross-source rejection is covered by the dedicated test above.
+    const researched = await invoke(executable, ["run", "canonical", "--fixture", "--workspace", workspace, "--json"], consumer);
     expect(researched.code).toBe(0);
     const result = researched.envelope.data as {
       run: { id: string };
@@ -520,7 +545,6 @@ describe("installed standalone CLI", () => {
       rejected: unknown[];
       opportunities: Array<{ id: string }>;
     };
-    expect(result.documents).toHaveLength(4);
     expect(result.admittedCount).toBeGreaterThan(0);
     expect(result.rejected.length).toBeGreaterThan(0);
 

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { admitToLibrary, asId } from "@idea-finder/core";
+import { admitToLibrary, asId, buildExactDuplicateIndependenceIndex } from "@idea-finder/core";
 import type {
   Chunk,
   EvidenceItem,
   HuntingTaskId,
+  RawDocument,
   RawSignal,
   ResearchRun,
   ResearchRunId,
@@ -36,6 +37,7 @@ export type OrchestratorStores = Pick<
   | "pipelineSteps"
   | "sourceStatuses"
   | "audit"
+  | "evidenceIndependence"
 >;
 
 export interface ResearchRunOrchestratorDeps {
@@ -177,6 +179,7 @@ async function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStore
   const evidence = stores.evidenceItems.listByRun(runId);
   const chunks = stores.chunks.listByRun(runId);
   const signals = stores.rawSignals.listByRun(runId);
+  const documents = stores.rawDocuments.listByRun(runId) as RawDocument[];
 
   const evidenceById = new Map<EvidenceItem["id"], EvidenceItem>(
     evidence.map((item) => [item.id, item]),
@@ -188,11 +191,20 @@ async function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStore
     signals.map((signal) => [signal.id, signal]),
   );
 
+  const independence = buildExactDuplicateIndependenceIndex(documents.map((document) => ({
+    documentId: document.id,
+    content: document.rawBody,
+    platform: document.platform,
+    url: document.url,
+  })));
+  stores.evidenceIndependence.saveIndex(runId, independence.records);
+
   const { admitted, rejected } = admitToLibrary(
     drafts,
     evidenceById,
     chunksById,
     signalsById,
+    { independenceGroupByDocumentId: independence.independenceGroupByDocumentId },
   );
 
   for (const opportunity of admitted) {

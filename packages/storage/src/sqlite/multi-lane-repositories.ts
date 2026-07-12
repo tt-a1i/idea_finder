@@ -138,8 +138,13 @@ export function createEvidenceIndependenceRepository(db: DatabaseSync): Evidence
   return {
     saveIndex(runId, records) {
       requireRun(db, runId);
-      const documents = (listDocuments.all(runId) as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as { id: string; rawBody: string });
-      const expected = buildExactDuplicateIndependenceIndex(documents.map((document) => ({ documentId: document.id as never, content: document.rawBody }))).records;
+      const documents = (listDocuments.all(runId) as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as { id: string; rawBody: string; platform?: string; url?: string });
+      const expected = buildExactDuplicateIndependenceIndex(documents.map((document) => ({
+        documentId: document.id as never,
+        content: document.rawBody,
+        platform: document.platform,
+        url: document.url,
+      }))).records;
       if (JSON.stringify(expected) !== JSON.stringify(records)) throw new Error(`Evidence independence index ${runId} conflicts with canonical documents`);
       for (const record of records) {
         insert.run(runId, record.documentId, record.independenceGroupId, record.contentFingerprint, JSON.stringify(record));
@@ -148,8 +153,13 @@ export function createEvidenceIndependenceRepository(db: DatabaseSync): Evidence
     },
     save(runId, record) {
       requireRun(db, runId);
-      const documents = (listDocuments.all(runId) as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as { id: string; rawBody: string });
-      const expected = buildExactDuplicateIndependenceIndex(documents.map((document) => ({ documentId: document.id as never, content: document.rawBody }))).records.find((item) => item.documentId === record.documentId);
+      const documents = (listDocuments.all(runId) as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as { id: string; rawBody: string; platform?: string; url?: string });
+      const expected = buildExactDuplicateIndependenceIndex(documents.map((document) => ({
+        documentId: document.id as never,
+        content: document.rawBody,
+        platform: document.platform,
+        url: document.url,
+      }))).records.find((item) => item.documentId === record.documentId);
       if (!expected || JSON.stringify(expected) !== JSON.stringify(record)) throw new Error(`EvidenceIndependence ${runId}/${record.documentId} conflicts with canonical documents`);
       if (!record.contentFingerprint.trim() || !record.independenceGroupId.trim() || !getDocument.get(runId, record.documentId) || !getDocument.get(runId, record.canonicalDocumentId)) {
         throw new Error(`EvidenceIndependence ${runId}/${record.documentId} has invalid document references`);

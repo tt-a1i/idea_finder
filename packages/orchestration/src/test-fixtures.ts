@@ -132,7 +132,7 @@ function rawDocument(id: string): RawDocument {
     fetchMethod: "api",
     fetchAgentRunId: null,
     contentType: "post",
-    rawBody: "content",
+    rawBody: `Independent fixture body for ${id}`,
     huntingTaskId: asId("task-fixture"),
     retentionClass: "standard",
     legalBasis: "public_api_tos",

@@ -531,7 +531,12 @@ describe("@idea-finder/storage local persistence", () => {
       storage.trendSeries.save(built.series);
       const event = detectLatestPackageDownloadEvent(built.series, new Map(built.observations.map((item) => [item.id, item])), { detectedAt: "2026-07-11T00:00:00.000Z" })!;
       storage.trendEvents.append(event);
-      const independence = buildExactDuplicateIndependenceIndex([docA, docB, docC].map((document) => ({ documentId: document.id, content: document.rawBody })));
+      const independence = buildExactDuplicateIndependenceIndex([docA, docB, docC].map((document) => ({
+        documentId: document.id,
+        content: document.rawBody,
+        platform: document.platform,
+        url: document.url,
+      })));
       const independenceA = independence.records.find((item) => item.documentId === docA.id)!;
       const independenceB = independence.records.find((item) => item.documentId === docB.id)!;
       const independenceC = independence.records.find((item) => item.documentId === docC.id)!;

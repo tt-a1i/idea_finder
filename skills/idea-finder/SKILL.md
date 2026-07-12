@@ -23,7 +23,7 @@ Read [references/cli-workflows.md](references/cli-workflows.md) for installation
 10. Never invent, complete, rewrite, translate, paraphrase, synthesize, or infer manual-import text. Import user-provided text verbatim; do not add pain, workaround, willingness-to-pay, persona, frequency, or source details the user did not supply.
 11. Never treat agent reasoning, examples, fixtures, or test prompts as real evidence.
 12. When the user provides no manual materials, use real public sources. If those sources fail or are unavailable, keep an empty or `partial` result, list missing sources under `Partial result:` / `Unresolved uncertainty:`, and do not call `--manual-import` to fill the gap.
-13. Multiple manual imports from the same user turn do not count as multiple independent sources; they remain one `manual` provenance lane and must not be presented as cross-source corroboration.
+13. Multiple manual imports from the same user turn do not count as multiple independent sources; they remain one `manual` provenance lane and must not be presented as cross-source corroboration. Without distinct user-provided provenance (such as different URLs), they cannot alone satisfy cross-source Library admission.
 
 ## Choose sources by claim
 

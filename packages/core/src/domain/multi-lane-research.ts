@@ -215,8 +215,8 @@ export interface EvidenceIndependenceRecord {
   readonly contentFingerprint: string;
   readonly independenceGroupId: string;
   readonly canonicalDocumentId: RawDocumentId;
-  readonly relation: "independent" | "exact_duplicate" | "syndicated" | "unknown";
-  readonly basis: "normalized_content_sha256_v1" | "normalized_content_containment_v1" | "independence_unknown";
+  readonly relation: "independent" | "exact_duplicate" | "syndicated" | "same_provenance" | "unknown";
+  readonly basis: "normalized_content_sha256_v1" | "normalized_content_containment_v1" | "manual_shared_provenance_v1" | "independence_unknown";
 }
 
 export interface EvidenceIndependenceIndex {
@@ -224,36 +224,134 @@ export interface EvidenceIndependenceIndex {
   readonly independenceGroupByDocumentId: ReadonlyMap<RawDocumentId, string>;
 }
 
+export interface IndependenceDocumentInput {
+  readonly documentId: RawDocumentId;
+  readonly content: string;
+  readonly platform?: string;
+  readonly url?: string;
+}
+
 function normalizeContent(content: string): string {
   return content.normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
-export function buildExactDuplicateIndependenceIndex(
-  documents: readonly { readonly documentId: RawDocumentId; readonly content: string }[],
-): EvidenceIndependenceIndex {
-  const normalized = documents.map((document) => ({ ...document, normalized: normalizeContent(document.content) }));
-  for (const document of normalized) if (!document.normalized) throw new InvariantViolation("independence.content_required", `Document ${document.documentId} has no content`);
-  const parent = normalized.map((_, index) => index);
-  const find = (index: number): number => parent[index] === index ? index : (parent[index] = find(parent[index]!));
-  const union = (left: number, right: number) => { const a = find(left); const b = find(right); if (a !== b) parent[Math.max(a, b)] = Math.min(a, b); };
-  for (let left = 0; left < normalized.length; left += 1) for (let right = left + 1; right < normalized.length; right += 1) {
-    const a = normalized[left]!.normalized; const b = normalized[right]!.normalized;
-    const shorter = a.length <= b.length ? a : b; const longer = a.length <= b.length ? b : a;
-    if (a === b || (shorter.length >= 40 && shorter.length / longer.length >= 0.6 && longer.includes(shorter))) union(left, right);
+/** User-supplied provenance URL (not the connector's content-hash placeholder). */
+export function isExplicitManualProvenance(url: string | undefined): boolean {
+  if (!url?.trim()) return false;
+  return !url.startsWith("manual://import/");
+}
+
+function contentIsContained(a: string, b: string): boolean {
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  return shorter.length >= 40 && shorter.length / longer.length >= 0.6 && longer.includes(shorter);
+}
+
+function groupIdForMembers(
+  ordered: readonly { readonly documentId: RawDocumentId; readonly normalized: string; readonly platform?: string; readonly url?: string }[],
+  canonical: { readonly documentId: RawDocumentId; readonly normalized: string },
+): string {
+  const allManualShared = ordered.every((document) => document.platform === "manual" && !isExplicitManualProvenance(document.url));
+  if (allManualShared) {
+    return `ind_manual_shared_${createHash("sha256").update(String(canonical.documentId)).digest("hex").slice(0, 16)}`;
   }
+  const explicitUrls = [...new Set(ordered.map((document) => document.url).filter((url): url is string => isExplicitManualProvenance(url)))];
+  const allManualExplicit = ordered.every((document) => document.platform === "manual" && isExplicitManualProvenance(document.url));
+  if (allManualExplicit && explicitUrls.length === 1) {
+    return `ind_manual_url_${createHash("sha256").update(explicitUrls[0]!).digest("hex").slice(0, 16)}`;
+  }
+  return `ind_${createHash("sha256").update(canonical.normalized).digest("hex").slice(0, 24)}`;
+}
+
+export function buildExactDuplicateIndependenceIndex(
+  documents: readonly IndependenceDocumentInput[],
+): EvidenceIndependenceIndex {
+  const normalized = documents.map((document) => ({
+    documentId: document.documentId,
+    content: document.content,
+    platform: document.platform,
+    url: document.url,
+    normalized: normalizeContent(document.content),
+  }));
+  for (const document of normalized) {
+    if (!document.normalized) {
+      throw new InvariantViolation("independence.content_required", `Document ${document.documentId} has no content`);
+    }
+  }
+  const parent = normalized.map((_, index) => index);
+  const find = (index: number): number => (parent[index] === index ? index : (parent[index] = find(parent[index]!)));
+  const union = (left: number, right: number) => {
+    const a = find(left);
+    const b = find(right);
+    if (a !== b) parent[Math.max(a, b)] = Math.min(a, b);
+  };
+
+  for (let left = 0; left < normalized.length; left += 1) {
+    for (let right = left + 1; right < normalized.length; right += 1) {
+      const a = normalized[left]!.normalized;
+      const b = normalized[right]!.normalized;
+      if (a === b || contentIsContained(a, b)) union(left, right);
+    }
+  }
+
+  const sharedManualIndices = normalized
+    .map((document, index) => ({ document, index }))
+    .filter(({ document }) => document.platform === "manual" && !isExplicitManualProvenance(document.url))
+    .map(({ index }) => index);
+  for (let index = 1; index < sharedManualIndices.length; index += 1) {
+    union(sharedManualIndices[0]!, sharedManualIndices[index]!);
+  }
+
+  const explicitUrlBuckets = new Map<string, number[]>();
+  normalized.forEach((document, index) => {
+    if (document.platform !== "manual" || !isExplicitManualProvenance(document.url)) return;
+    const bucket = explicitUrlBuckets.get(document.url!) ?? [];
+    bucket.push(index);
+    explicitUrlBuckets.set(document.url!, bucket);
+  });
+  for (const indices of explicitUrlBuckets.values()) {
+    for (let index = 1; index < indices.length; index += 1) union(indices[0]!, indices[index]!);
+  }
+
   const groups = new Map<number, typeof normalized>();
-  normalized.forEach((document, index) => { const root = find(index); groups.set(root, [...(groups.get(root) ?? []), document]); });
+  normalized.forEach((document, index) => {
+    const root = find(index);
+    groups.set(root, [...(groups.get(root) ?? []), document]);
+  });
+
   const records: EvidenceIndependenceRecord[] = [];
   const map = new Map<RawDocumentId, string>();
   for (const members of [...groups.values()].sort((a, b) => a[0]!.documentId.localeCompare(b[0]!.documentId))) {
     const ordered = [...members].sort((a, b) => a.documentId.localeCompare(b.documentId));
     const canonical = ordered[0]!;
-    const fingerprint = createHash("sha256").update(canonical.normalized).digest("hex");
     const canonicalDocumentId = canonical.documentId;
-    const groupId = `ind_${fingerprint.slice(0, 24)}`;
+    const groupId = groupIdForMembers(ordered, canonical);
     ordered.forEach((document, index) => {
       const exact = document.normalized === canonical.normalized;
-      records.push({ documentId: document.documentId, contentFingerprint: createHash("sha256").update(document.normalized).digest("hex"), independenceGroupId: groupId, canonicalDocumentId, relation: index === 0 ? "independent" : exact ? "exact_duplicate" : "syndicated", basis: exact ? "normalized_content_sha256_v1" : "normalized_content_containment_v1" });
+      const contained = !exact && contentIsContained(document.normalized, canonical.normalized);
+      let relation: EvidenceIndependenceRecord["relation"];
+      let basis: EvidenceIndependenceRecord["basis"];
+      if (index === 0) {
+        relation = "independent";
+        basis = "normalized_content_sha256_v1";
+      } else if (exact) {
+        relation = "exact_duplicate";
+        basis = "normalized_content_sha256_v1";
+      } else if (contained) {
+        relation = "syndicated";
+        basis = "normalized_content_containment_v1";
+      } else {
+        relation = "same_provenance";
+        basis = "manual_shared_provenance_v1";
+      }
+      records.push({
+        documentId: document.documentId,
+        contentFingerprint: createHash("sha256").update(document.normalized).digest("hex"),
+        independenceGroupId: groupId,
+        canonicalDocumentId,
+        relation,
+        basis,
+      });
       map.set(document.documentId, groupId);
     });
   }

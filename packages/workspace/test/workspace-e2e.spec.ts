@@ -70,15 +70,19 @@ describe("workspace vertical slice", () => {
         manualImports: [
           {
             text: "I invoice from a Google Sheet every month — painful workaround reconciling Stripe payouts.",
+            url: "https://interviews.example/sheet-workaround",
           },
           {
             text: "Would pay $30/mo for lightweight solo SaaS invoicing with Stripe sync.",
+            url: "https://interviews.example/wtp",
           },
           {
-            text: "Need something simpler than QuickBooks for month-end invoicing.",
+            text: "Month-end Stripe reconciliation is painfully broken and I need a simpler invoicing workflow.",
+            url: "https://interviews.example/simpler-tool",
           },
           {
             text: "QuickBooks works fine for enterprise — not a problem for us.",
+            url: "https://interviews.example/disconfirming",
           },
         ],
       },
@@ -88,6 +92,12 @@ describe("workspace vertical slice", () => {
     expect(run.run.status).toBe("completed");
     expect(run.signals.length).toBeGreaterThan(0);
     expect(run.evidence.length).toBeGreaterThanOrEqual(3);
+    expect(run.documents.map((document) => document.url).sort()).toEqual([
+      "https://interviews.example/disconfirming",
+      "https://interviews.example/sheet-workaround",
+      "https://interviews.example/simpler-tool",
+      "https://interviews.example/wtp",
+    ]);
     expect(run.admittedCount).toBeGreaterThanOrEqual(1);
 
     await expect(access(path.join(root, "pipeline", "idea_finder.db"))).resolves.toBeUndefined();
@@ -197,7 +207,7 @@ describe("workspace vertical slice", () => {
       ),
     ).toBe(0);
 
-    expect(await runCli(["run", "orch", "--orchestration"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "orch", "--fixture"], cliOpts)).toBe(0);
     expect(lines.some((l) => l.includes("admitted"))).toBe(true);
 
     const libStart = lines.length;
