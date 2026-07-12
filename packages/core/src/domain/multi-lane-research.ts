@@ -313,6 +313,23 @@ export function buildExactDuplicateIndependenceIndex(
     for (let index = 1; index < indices.length; index += 1) union(indices[0]!, indices[index]!);
   }
 
+  // HN story + comments from the same discussion are one independence group.
+  const hnThreadBuckets = new Map<string, number[]>();
+  normalized.forEach((document, index) => {
+    if (document.platform !== "hn") return;
+    const storyFromBody = document.content.match(/Story-ID:\s*(\d+)/)?.[1];
+    const storyFromUrl = document.url?.match(/[?&]id=(\d+)/)?.[1] ?? document.url?.match(/item\?id=(\d+)/)?.[1];
+    // Comments carry Story-ID; stories use their own item id from URL when no Story-ID line exists.
+    const storyId = storyFromBody ?? storyFromUrl;
+    if (!storyId) return;
+    const bucket = hnThreadBuckets.get(storyId) ?? [];
+    bucket.push(index);
+    hnThreadBuckets.set(storyId, bucket);
+  });
+  for (const indices of hnThreadBuckets.values()) {
+    for (let index = 1; index < indices.length; index += 1) union(indices[0]!, indices[index]!);
+  }
+
   const groups = new Map<number, typeof normalized>();
   normalized.forEach((document, index) => {
     const root = find(index);

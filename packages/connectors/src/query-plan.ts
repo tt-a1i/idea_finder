@@ -10,6 +10,8 @@ export interface SourceSearchQuery extends SearchQuery {
   readonly appId?: string;
   /** Stack Exchange site slug; defaults to stackoverflow. */
   readonly stackExchangeSite?: string;
+  /** HN Algolia tags filter; defaults to story. Use "comment" for comment search. */
+  readonly hnTags?: string;
   readonly queryId?: string;
   readonly queryText?: string;
 }

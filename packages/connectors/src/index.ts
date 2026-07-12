@@ -19,6 +19,7 @@ export * from "./connectors/app-store-rss.js";
 export * from "./connectors/stack-exchange.js";
 export * from "./connectors/manual-import.js";
 export * from "./connectors/github.js";
+export * from "./connectors/github-issues.js";
 export * from "./connectors/google-trends.js";
 export * from "./connectors/npm-downloads.js";
 export * from "./connectors/pypi-downloads.js";

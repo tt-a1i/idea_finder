@@ -19,6 +19,19 @@ interface StackExchangeItem {
   readonly link: string;
   readonly creation_date?: number;
   readonly tags?: readonly string[];
+  readonly score?: number;
+  readonly answer_count?: number;
+  readonly is_answered?: boolean;
+  readonly accepted_answer_id?: number;
+}
+
+interface StackExchangeAnswer {
+  readonly answer_id: number;
+  readonly body?: string;
+  readonly score?: number;
+  readonly is_accepted?: boolean;
+  readonly creation_date?: number;
+  readonly link?: string;
 }
 
 interface StackExchangeSearchResponse {
@@ -61,6 +74,24 @@ export function createStackExchangeConnector(
         const data = await fetchJson<StackExchangeSearchResponse>(fetcher, url);
         for (const item of data.items) {
           yield itemToDocument(item, site, query);
+          const answersUrl = new URL(`${baseUrl}/questions/${item.question_id}/answers`);
+          answersUrl.searchParams.set("order", "desc");
+          answersUrl.searchParams.set("sort", "votes");
+          answersUrl.searchParams.set("site", site);
+          answersUrl.searchParams.set("pagesize", "3");
+          answersUrl.searchParams.set("filter", "withbody");
+          try {
+            const answers = await fetchJson<{ readonly items: readonly StackExchangeAnswer[] }>(fetcher, answersUrl);
+            if (!answers.items?.length) {
+              // Explicit no-answer record stays on the question document metadata.
+              continue;
+            }
+            for (const answer of answers.items) {
+              yield answerToDocument(item, answer, site, query);
+            }
+          } catch {
+            // Answer fetch failures must not drop the question.
+          }
         }
       }
     },
@@ -92,7 +123,13 @@ function itemToDocument(
   query: SourceSearchQuery,
 ): RawDocument {
   const tags = item.tags?.length ? `Tags: ${item.tags.join(", ")}` : "";
-  const rawBody = [item.title ?? "", stripHtml(item.body ?? ""), tags].filter(Boolean).join("\n\n");
+  const meta = [
+    item.score !== undefined ? `Score: ${item.score}` : null,
+    item.answer_count !== undefined ? `Answer-Count: ${item.answer_count}` : null,
+    item.is_answered !== undefined ? `Is-Answered: ${item.is_answered}` : null,
+    item.accepted_answer_id !== undefined ? `Accepted-Answer-Id: ${item.accepted_answer_id}` : "Accepted-Answer-Id: none",
+  ].filter(Boolean).join("\n");
+  const rawBody = [item.title ?? "", stripHtml(item.body ?? ""), tags, meta].filter(Boolean).join("\n\n");
 
   return normalizeDocument({
     platform: "stack_exchange",
@@ -106,6 +143,32 @@ function itemToDocument(
     fetchedAt: item.creation_date
       ? new Date(item.creation_date * 1000).toISOString()
       : undefined,
+  });
+}
+
+function answerToDocument(
+  question: StackExchangeItem,
+  answer: StackExchangeAnswer,
+  site: string,
+  query: SourceSearchQuery,
+): RawDocument {
+  const rawBody = [
+    `Answer to: ${question.title ?? question.question_id}`,
+    stripHtml(answer.body ?? ""),
+    answer.score !== undefined ? `Score: ${answer.score}` : null,
+    `Accepted: ${answer.is_accepted ? "true" : "false"}`,
+    `Parent-Question: ${question.link}`,
+  ].filter(Boolean).join("\n\n");
+  return normalizeDocument({
+    platform: "stack_exchange",
+    externalId: `${site}:answer:${answer.answer_id}`,
+    url: answer.link ?? `${question.link}/${answer.answer_id}#${answer.answer_id}`,
+    rawBody,
+    contentType: "comment",
+    huntingTaskId: query.huntingTaskId,
+    fetchMethod: "api",
+    legalBasis: "public_api_tos",
+    fetchedAt: answer.creation_date ? new Date(answer.creation_date * 1000).toISOString() : undefined,
   });
 }
 

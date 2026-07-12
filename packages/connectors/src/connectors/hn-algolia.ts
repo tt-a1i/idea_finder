@@ -19,6 +19,9 @@ interface HnHit {
   readonly author?: string;
   readonly created_at?: string;
   readonly comment_text?: string;
+  readonly parent_id?: number;
+  readonly story_id?: number;
+  readonly story_title?: string;
 }
 
 interface HnSearchResponse {
@@ -57,7 +60,7 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
       for (const searchTerm of queryTexts) {
         const url = hnApiUrl(baseUrl, "/search");
         url.searchParams.set("query", searchTerm);
-        url.searchParams.set("tags", "story");
+        url.searchParams.set("tags", query.hnTags ?? "story");
         url.searchParams.set("hitsPerPage", String(limit));
         if (query.since) {
           const sinceEpoch = Math.floor(Date.parse(query.since) / 1000);
@@ -86,9 +89,17 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
 }
 
 function hitToDocument(hit: HnHit, query: SourceSearchQuery): RawDocument {
-  const title = hit.title ?? "(untitled)";
+  const isComment = (query.hnTags ?? "story") === "comment" || Boolean(hit.comment_text && !hit.story_text);
+  const title = hit.title ?? hit.story_title ?? (isComment ? "(comment)" : "(untitled)");
   const body = hit.story_text ?? hit.comment_text ?? "";
-  const rawBody = [title, body].filter(Boolean).join("\n\n");
+  const linkage = isComment
+    ? [
+        hit.story_id !== undefined ? `Story-ID: ${hit.story_id}` : null,
+        hit.parent_id !== undefined ? `Parent-ID: ${hit.parent_id}` : null,
+        hit.story_title ? `Story-Title: ${hit.story_title}` : null,
+      ].filter(Boolean).join("\n")
+    : "";
+  const rawBody = [title, body, linkage].filter(Boolean).join("\n\n");
   const url = hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`;
 
   return normalizeDocument({
@@ -96,7 +107,7 @@ function hitToDocument(hit: HnHit, query: SourceSearchQuery): RawDocument {
     externalId: hit.objectID,
     url,
     rawBody,
-    contentType: hit.story_text || hit.title ? "post" : "comment",
+    contentType: isComment ? "comment" : "post",
     huntingTaskId: query.huntingTaskId,
     fetchMethod: "api",
     legalBasis: "public_api_tos",

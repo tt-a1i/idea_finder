@@ -4,6 +4,7 @@ import { createHnAlgoliaConnector, type HnAlgoliaConnectorOptions } from "./conn
 import { createManualImportConnector } from "./connectors/manual-import.js";
 import { createStackExchangeConnector, type StackExchangeConnectorOptions } from "./connectors/stack-exchange.js";
 import { createV2exConnector, type V2exConnectorOptions } from "./connectors/v2ex.js";
+import { createGitHubIssuesConnector, type GitHubIssuesConnectorOptions } from "./connectors/github-issues.js";
 import type { FetchOptions } from "./lib/fetch.js";
 
 export interface L0ConnectorPackOptions {
@@ -12,6 +13,7 @@ export interface L0ConnectorPackOptions {
   readonly v2ex?: V2exConnectorOptions;
   readonly appStore?: AppStoreRssConnectorOptions;
   readonly stackExchange?: StackExchangeConnectorOptions;
+  readonly githubIssues?: GitHubIssuesConnectorOptions;
 }
 
 /** Default L0 connector pack — public APIs/RSS only, no secrets required. */
@@ -22,6 +24,7 @@ export function createL0ConnectorPack(options: L0ConnectorPackOptions = {}): Sou
     createV2exConnector({ ...shared, ...options.v2ex }),
     createAppStoreRssConnector({ ...shared, ...options.appStore }),
     createStackExchangeConnector({ ...shared, ...options.stackExchange }),
+    createGitHubIssuesConnector({ ...shared, ...options.githubIssues }),
     createManualImportConnector(),
   ];
 }
