@@ -9,7 +9,7 @@ npm install
 npm run build
 npm pack
 npm install -g ./idea-finder-0.0.0.tgz
-idea-finder workspace diagnostics --json
+idea-finder workspace diagnostics --workspace "$PWD/workspace" --init --json
 ```
 
 The package also ships the companion Codex Skill. For a local clean install:
@@ -43,19 +43,19 @@ HN probe is never part of the release gate and does not affect release status.
 
 ## Usage
 
-Default workspace directory: `data/workspace/` (gitignored).
+Default workspace directory: platform user data dir (`~/Library/Application Support/idea-finder/workspace` on macOS, `~/.local/share/idea-finder/workspace` elsewhere), overridable with `IDEA_FINDER_WORKSPACE` or `--workspace`. Prefer an explicit `--workspace` from Agent workflows. `workspace diagnostics` does not create a missing directory unless `--init` is passed.
 
 ```bash
-# Create and list hunting briefs (stored as JSON under data/workspace/briefs/)
-npm run cli -- brief create invoicing --title "Solo SaaS invoicing" --description "Stripe-sync pain"
-npm run cli -- brief list
+# Create and list hunting briefs
+npm run cli -- brief create invoicing --title "Solo SaaS invoicing" --description "Stripe-sync pain" --workspace ./workspace
+npm run cli -- brief list --workspace ./workspace
 
 # Direct executable after install/link
-idea-finder brief list
-idea-finder workspace diagnostics
+idea-finder brief list --workspace ./workspace
+idea-finder workspace diagnostics --workspace ./workspace
 
 # Run a fresh ResearchRun through the real local pipeline (default)
-npm run cli -- run invoicing
+npm run cli -- run invoicing --workspace ./workspace
 
 # Retry or resume a named ResearchRun without changing its identity
 npm run cli -- run invoicing --retry run_123

@@ -49,7 +49,9 @@ async function invoke(args: readonly string[], workspace: string): Promise<Invoc
 
 function requireSkillPolicy(skill: string): void {
   const requiredRules = [
-    "Run `idea-finder workspace diagnostics --json` before mutating a workspace.",
+    "Always pass an explicit `--workspace <absolute-path>` on every command",
+    "Run `idea-finder workspace diagnostics --workspace <dir> --json` before mutating a workspace",
+    "Diagnostics does not create directories",
     "Use `--json` for every command.",
     "Treat calibration and validation mutations as human decisions.",
     "ask for an explicit user decision before calling `board calibrate`, `validation add`, or `validation complete`",

@@ -11,10 +11,12 @@ npm pack
 npm install -g ./idea-finder-0.0.0.tgz
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R "$(npm root -g)/idea-finder/skills/idea-finder" "${CODEX_HOME:-$HOME/.codex}/skills/idea-finder"
-idea-finder workspace diagnostics --json
+idea-finder workspace diagnostics --workspace "$HOME/Library/Application Support/idea-finder/workspace" --json
+# Missing workspace: pass --init once, or let the first mutation create it.
+# idea-finder workspace diagnostics --workspace <dir> --init --json
 ```
 
-After installation, invoke the executable as `idea-finder` (or the local `.bin` path above). Add `--workspace <dir>` when the user selected a non-default workspace.
+After installation, invoke the executable as `idea-finder` (or the local `.bin` path above). **Always** pass `--workspace <absolute-dir>` from Agent workflows. The CLI default (when the flag is omitted) is a stable user data directory—macOS `~/Library/Application Support/idea-finder/workspace`, otherwise `~/.local/share/idea-finder/workspace`—or `IDEA_FINDER_WORKSPACE` when set. It is not a cwd-relative `data/workspace` path. `workspace diagnostics` does not create directories unless `--init` is passed.
 
 ## Discovery and focused research
 
@@ -75,7 +77,7 @@ idea-finder library rejected --run <runId> --json
 trend/star/ranking/download-only rejects live on `research inspect` /
 `export` under `summary.candidates` and must not be treated as Library entries.
 
-Run each CLI command as its own invocation. Do not chain exploratory `ls` or path probes with `&&` before the first `workspace diagnostics` call; create the workspace by passing `--workspace <dir>` to the CLI.
+Run each CLI command as its own invocation. Do not chain exploratory `ls` or path probes with `&&` before the first `workspace diagnostics` call. Always pass `--workspace <dir>`; diagnostics alone will not create a missing directory—use `--init` or the first mutation.
 ## Incomplete research and retry
 
 Read `data.sourceStatuses`, `incompleteness.reasons`, and retained claims when status is `partial` (exit 6). Successful lanes remain inspectable. Retry the same run:

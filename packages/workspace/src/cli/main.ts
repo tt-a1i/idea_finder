@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
@@ -15,8 +16,7 @@ import {
   type CliMachineEnvelope,
   type CliStructuredError,
 } from "./contract.js";
-
-const DEFAULT_WORKSPACE = "data/workspace";
+import { resolveCliWorkspaceDir } from "./workspace-path.js";
 
 export interface CliOptions {
   readonly workspaceDir?: string;
@@ -78,7 +78,8 @@ Usage:
   idea-finder agent run <taskId>
 
 Options:
-  --workspace <dir>   Workspace data directory (default: data/workspace)
+  --workspace <dir>   Workspace data directory (default: user data dir, or IDEA_FINDER_WORKSPACE)
+  --init              Create a missing workspace during diagnostics
   --json              Emit the versioned machine envelope
   --help              Show this help
 `;
@@ -161,7 +162,7 @@ interface ArgumentShape {
 }
 
 const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
-  "workspace diagnostics": { valueFlags: [], positionalCount: 2 },
+  "workspace diagnostics": { valueFlags: [], booleanFlags: ["--init"], positionalCount: 2 },
   "brief create": { valueFlags: ["--title", "--description", "--lens", "--source", "--term", "--app-id", "--stackexchange-site", "--manual-import", "--github-repo", "--google-subject", "--google-geo", "--npm-package", "--pypi-package", "--from", "--to"], positionalCount: 3 },
   "brief list": { valueFlags: [], positionalCount: 2 },
   run: { valueFlags: ["--retry", "--resume", "--fixture-source-outcome"], booleanFlags: ["--fixture", "--orchestration"], positionalCount: 2 },
@@ -222,11 +223,32 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
   validateArguments(argv);
 
   if (cmd === "workspace" && sub === "diagnostics") {
-    await mkdir(workspaceDir, { recursive: true });
-    const service = svc(workspaceDir);
+    const resolved = path.resolve(workspaceDir);
+    const shouldInit = has(argv, "--init");
+    if (!existsSync(resolved)) {
+      if (!shouldInit) {
+        const data = {
+          workspace: resolved,
+          exists: false,
+          initialized: false,
+          accessible: false,
+          runnerMode: "orchestration",
+          counts: { briefs: 0, researchRuns: 0, opportunities: 0, agentTasks: 0 },
+        };
+        return {
+          command: "workspace diagnostics",
+          data,
+          human: `Workspace ${resolved}\nStatus: missing (pass --init to create)\nBriefs: 0; runs: 0; opportunities: 0`,
+        };
+      }
+      await mkdir(resolved, { recursive: true });
+    }
+    const service = svc(resolved);
     const [briefs, state] = await Promise.all([service.listBriefs(), service.getState()]);
     const data = {
-      workspace: path.resolve(workspaceDir),
+      workspace: resolved,
+      exists: true,
+      initialized: true,
       accessible: true,
       runnerMode: "orchestration",
       counts: {
@@ -724,7 +746,10 @@ export async function runCli(argv: string[], opts: CliOptions = {}): Promise<num
       throw new CliFailure("validation", "cli.format_invalid", "--format must be json", CLI_EXIT_CODES.validation, { format });
     }
     machine = machine || format === "json";
-    const workspaceDir = flag(argv, "--workspace") ?? opts.workspaceDir ?? DEFAULT_WORKSPACE;
+    const workspaceDir = resolveCliWorkspaceDir({
+      flag: flag(argv, "--workspace"),
+      optsWorkspaceDir: opts.workspaceDir,
+    });
     const filtered = argv.filter((value, index) => !["--json", "--workspace", "--format"].includes(value) && !["--workspace", "--format"].includes(argv[index - 1] ?? ""));
     name = commandName(filtered);
     const result = await execute(filtered, workspaceDir);

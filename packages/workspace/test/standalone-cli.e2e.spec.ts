@@ -89,7 +89,12 @@ describe("installed standalone CLI", () => {
   });
 
   it("installs into a clean consumer and exposes diagnostics plus Brief create/list", async () => {
-    const diagnostics = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    const missingDiagnostics = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    expect(missingDiagnostics.code).toBe(CLI_EXIT_CODES.success);
+    expect(missingDiagnostics.envelope.data).toMatchObject({ exists: false, initialized: false, accessible: false });
+    expect((await import("node:fs")).existsSync(workspace)).toBe(false);
+
+    const diagnostics = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--init", "--json"], consumer);
     expect(diagnostics.code).toBe(CLI_EXIT_CODES.success);
     expect(diagnostics.stderr).toBe("");
     expect(diagnostics.envelope).toMatchObject({
@@ -99,7 +104,13 @@ describe("installed standalone CLI", () => {
       warnings: [],
       incompleteness: { incomplete: false, reasons: [] },
       errors: [],
-      data: { workspace: path.resolve(workspace), accessible: true, counts: { briefs: 0 } },
+      data: {
+        workspace: path.resolve(workspace),
+        exists: true,
+        initialized: true,
+        accessible: true,
+        counts: { briefs: 0 },
+      },
     });
 
     const created = await invoke(executable, ["brief", "create", "agents", "--title", "Agent demand", "--workspace", workspace, "--json"], consumer);
@@ -644,8 +655,12 @@ describe("installed standalone CLI", () => {
     expect(installedSkill).not.toContain("TODO");
     const unrelatedCwd = await mkdtemp(path.join(os.tmpdir(), "idea-finder-path-"));
     try {
-      const bare = await exec("idea-finder", ["workspace", "diagnostics", "--workspace", path.join(unrelatedCwd, "workspace"), "--json"], { cwd: unrelatedCwd, env: { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` } });
-      expect((JSON.parse(bare.stdout) as CliMachineEnvelope).status).toBe("success");
+      const missingWorkspace = path.join(unrelatedCwd, "workspace");
+      const bare = await exec("idea-finder", ["workspace", "diagnostics", "--workspace", missingWorkspace, "--json"], { cwd: unrelatedCwd, env: { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` } });
+      const envelope = JSON.parse(bare.stdout) as CliMachineEnvelope;
+      expect(envelope.status).toBe("success");
+      expect(envelope.data).toMatchObject({ exists: false, initialized: false, accessible: false });
+      expect((await import("node:fs")).existsSync(missingWorkspace)).toBe(false);
     } finally { await rm(unrelatedCwd, { recursive: true, force: true }); }
   });
 });
