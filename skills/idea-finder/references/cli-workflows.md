@@ -18,19 +18,19 @@ After installation, invoke the executable as `idea-finder` (or the local `.bin` 
 
 ## Discovery and focused research
 
-Create a public qualitative-source Brief:
+Create a public qualitative-source Brief (no agent-invented manual imports):
 
 ```bash
 idea-finder brief create agent-workflows --title "Agent coding workflows" --description "Repeated coordination pain" --lens pain,workaround,commercial_intent,contradictory_evidence --source hn --source stack_exchange --term "agent coding" --term workaround --json
 ```
 
-App Store discovery also requires `--app-id`. Login-gated evidence must arrive through an explicitly authorized integration or a user-provided import:
+Login-gated evidence must arrive through an explicitly authorized integration or a **user-provided verbatim** import. Only pass `--manual-import` when the user supplied the exact text (or authorized an existing file/note). Example using user-provided verbatim text:
 
 ```bash
 idea-finder brief create imported-interviews --title "Imported interviews" --manual-import "User-provided verbatim note" --json
 ```
 
-Create a focused multi-lane Brief and run it:
+Create a focused multi-lane Brief. The `--manual-import` below is **user-provided verbatim text** (or a deterministic test fixture labeled as such)—never agent-authored filler:
 
 ```bash
 idea-finder brief create agent-demand --title "Agent demand" --manual-import "This workaround is painful" --google-subject "agent coding" --google-geo US --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool --from 2026-01-01 --to 2026-01-10 --json
@@ -85,7 +85,7 @@ idea-finder research run agent-demand --retry <runId> --json
 idea-finder research inspect <runId> --json
 ```
 
-Do not retry an unauthorized source until the user supplies authorization or an import. Do not use `--fixture` / `--fixture-set` to paper over live failures.
+Do not retry an unauthorized source until the user supplies authorization or an import. Do not use `--fixture` / `--fixture-set` to paper over live failures. Do not invent `--manual-import` text when public sources fail; keep the empty or partial result and report unresolved uncertainty.
 
 ## Opportunity and validation boundary
 

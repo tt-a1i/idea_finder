@@ -7,6 +7,9 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
+const VERBATIM_ONE = "Standup notes get lost between coding agents every Monday.";
+const VERBATIM_TWO = "We paste the same handoff workaround into Slack each week.";
+
 async function run(file, args, options = {}) {
   return exec(file, args, {
     cwd: repositoryRoot,
@@ -67,6 +70,40 @@ function requireCommands(commands, expected, events) {
   }
 }
 
+function manualImportValues(commands) {
+  const values = [];
+  for (const command of commands) {
+    let remaining = command;
+    while (remaining.includes("--manual-import")) {
+      const start = remaining.indexOf("--manual-import");
+      remaining = remaining.slice(start + "--manual-import".length).trimStart();
+      if (remaining.startsWith("=")) remaining = remaining.slice(1).trimStart();
+      if (remaining.startsWith("\"")) {
+        const end = remaining.indexOf("\"", 1);
+        if (end === -1) break;
+        values.push(remaining.slice(1, end));
+        remaining = remaining.slice(end + 1);
+        continue;
+      }
+      if (remaining.startsWith("'")) {
+        const end = remaining.indexOf("'", 1);
+        if (end === -1) break;
+        values.push(remaining.slice(1, end));
+        remaining = remaining.slice(end + 1);
+        continue;
+      }
+      // Unquoted: take until next flag or end. Prefer rejecting truncated multi-word forms
+      // by requiring the next token boundary only when a following --flag appears.
+      const nextFlag = remaining.search(/\s+--/);
+      const raw = (nextFlag === -1 ? remaining : remaining.slice(0, nextFlag)).trim();
+      if (!raw) break;
+      values.push(raw);
+      remaining = nextFlag === -1 ? "" : remaining.slice(nextFlag);
+    }
+  }
+  return values;
+}
+
 async function invokeCli(executable, args, env) {
   const result = await run(executable, args, { env });
   return JSON.parse(result.stdout);
@@ -116,22 +153,61 @@ async function main() {
 
     const executable = path.join(consumer, "node_modules", ".bin", "idea-finder");
     const env = { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` };
-    const discoveryWorkspace = path.join(consumer, "discovery-data");
-    const discovery = await runAgent({
+
+    // Negative: no user materials, no network fill-in — must not invent --manual-import.
+    const negativeWorkspace = path.join(consumer, "negative-data");
+    const negative = await runAgent({
       consumer,
       env,
-      prompt: `Use $idea-finder to research repeated demand around agent coding coordination. Work only in ${discoveryWorkspace}. Use three explicit manual imports describing repeated coordination pain and workarounds; do not use network sources. Follow the Skill workflow, inspect stored evidence, do not calibrate or validate, and finish with the Skill's evidence labels.`,
+      prompt: `Use $idea-finder to research repeated demand around agent coding coordination. Work only in ${negativeWorkspace}. I have not provided any interview notes, files, or manual imports. Do not use network sources and do not invent, rewrite, or synthesize --manual-import text. Follow the Skill workflow. If evidence is missing, keep an empty or partial result and finish with the Skill's evidence labels.`,
     });
-    const discoveryCommands = completedCommands(discovery);
-    const discoveryRequired = ["idea-finder workspace diagnostics", "idea-finder brief create", "idea-finder research run", "idea-finder research inspect"];
-    requireSuccessfulRequiredCommands(discovery, discoveryRequired);
-    requireCommands(discoveryCommands, discoveryRequired, discovery);
-    if (discoveryCommands.some((command) => /idea-finder (?:board calibrate|validation (?:add|complete))/.test(command))) {
-      throw new Error("Discovery Agent crossed the human-decision mutation boundary");
+    const negativeCommands = completedCommands(negative);
+    if (negativeCommands.some((command) => command.includes("--manual-import"))) {
+      throw new Error(`Negative Agent invented --manual-import:\n${negativeCommands.join("\n")}`);
     }
-    const discoveryMessage = finalMessage(discovery);
+    const negativeRequired = ["idea-finder workspace diagnostics"];
+    requireSuccessfulRequiredCommands(negative, negativeRequired);
+    const attemptedResearch = negativeCommands.some((command) =>
+      /idea-finder (?:brief create|research run|research inspect)/.test(command));
+    if (!attemptedResearch) {
+      throw new Error(`Negative Agent skipped canonical discovery commands:\n${negativeCommands.join("\n")}`);
+    }
+    const negativeMessage = finalMessage(negative);
+    if (!negativeMessage.includes("Partial result:") && !negativeMessage.includes("Unresolved uncertainty:")) {
+      throw new Error(`Negative Agent omitted Partial result / Unresolved uncertainty:\n${negativeMessage}`);
+    }
+
+    // Positive: import only the exact user-provided verbatim texts.
+    const positiveWorkspace = path.join(consumer, "positive-data");
+    const positive = await runAgent({
+      consumer,
+      env,
+      prompt: `Use $idea-finder to research demand in ${positiveWorkspace}. I am providing exactly two user-provided verbatim notes; import them unchanged with --manual-import and do not invent a third, do not embellish pain/WTP/persona/frequency, and do not use network sources. Follow the Skill workflow, inspect stored evidence, do not calibrate or validate, and finish with the Skill's evidence labels.\n\nUser-provided verbatim: "${VERBATIM_ONE}"\nUser-provided verbatim: "${VERBATIM_TWO}"`,
+    });
+    const positiveCommands = completedCommands(positive);
+    const positiveRequired = ["idea-finder workspace diagnostics", "idea-finder brief create", "idea-finder research run", "idea-finder research inspect"];
+    requireSuccessfulRequiredCommands(positive, positiveRequired);
+    requireCommands(positiveCommands, positiveRequired, positive);
+    if (positiveCommands.some((command) => /idea-finder (?:board calibrate|validation (?:add|complete))/.test(command))) {
+      throw new Error("Positive Agent crossed the human-decision mutation boundary");
+    }
+    const imports = manualImportValues(positiveCommands);
+    if (imports.length !== 2) {
+      throw new Error(`Expected exactly two --manual-import values, got ${imports.length}: ${JSON.stringify(imports)}`);
+    }
+    if (!imports.includes(VERBATIM_ONE) || !imports.includes(VERBATIM_TWO)) {
+      throw new Error(`Imported texts were altered or incomplete:\n${JSON.stringify(imports)}`);
+    }
+    const embellished = imports.some((text) =>
+      text !== VERBATIM_ONE
+      && text !== VERBATIM_TWO
+      && /(painful|would pay|persona|\$\d+|every (?:day|week))/i.test(text));
+    if (embellished) {
+      throw new Error(`Agent embellished manual-import text:\n${JSON.stringify(imports)}`);
+    }
+    const positiveMessage = finalMessage(positive);
     for (const label of ["Stored evidence:", "Inference:", "Unresolved uncertainty:"]) {
-      if (!discoveryMessage.includes(label)) throw new Error(`Discovery response omitted ${label}`);
+      if (!positiveMessage.includes(label)) throw new Error(`Positive response omitted ${label}`);
     }
 
     const validationWorkspace = path.join(consumer, "validation-data");
@@ -166,9 +242,11 @@ async function main() {
 
     process.stdout.write(JSON.stringify({
       ok: true,
-      discoveryCommands: discoveryCommands.length,
+      negativeCommands: negativeCommands.length,
+      positiveCommands: positiveCommands.length,
       validationCommands: validationCommands.length,
       validationStateUnchanged: true,
+      manualImportsUnaltered: true,
     }, null, 2) + "\n");
   } finally {
     await rm(tempRoot, { recursive: true, force: true });

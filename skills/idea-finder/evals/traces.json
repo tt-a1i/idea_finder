@@ -12,6 +12,28 @@
       "pausedForHumanDecision": false
     },
     {
+      "caseId": "discovery-no-user-materials",
+      "commands": [
+        "idea-finder workspace diagnostics --json",
+        "idea-finder brief create agent-workflows --title Agent-workflows --json",
+        "idea-finder research run agent-workflows --json",
+        "idea-finder research inspect <runId> --json"
+      ],
+      "response": "Partial result: public sources were unavailable or returned no usable evidence; no --manual-import was used.\nUnresolved uncertainty: qualitative demand remains unknown until real sources succeed or the user provides verbatim materials.",
+      "pausedForHumanDecision": false
+    },
+    {
+      "caseId": "manual-import-verbatim",
+      "commands": [
+        "idea-finder workspace diagnostics --json",
+        "idea-finder brief create agent-coding-demand --title Agent-coding-demand --manual-import Coordination handoffs break every Monday standup. --json",
+        "idea-finder research run agent-coding-demand --json",
+        "idea-finder research inspect <runId> --json"
+      ],
+      "response": "Stored evidence: cite only the user-provided verbatim import and its stored provenance.\nInference: keep interpretation separate from the imported text.\nUnresolved uncertainty: willingness to pay and independent public sources remain untested.\nNote: multiple manual imports from the same user turn are one manual lane, not cross-source corroboration.",
+      "pausedForHumanDecision": false
+    },
+    {
       "caseId": "focused-research",
       "commands": [
         "idea-finder workspace diagnostics --json",

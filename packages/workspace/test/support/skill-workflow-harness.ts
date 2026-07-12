@@ -9,8 +9,12 @@ const exec = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../../../..");
 const executable = path.join(repositoryRoot, "dist", "idea-finder.js");
 
+/** Marker for user-provided verbatim text in deterministic Skill eval prompts. */
+export const USER_PROVIDED_VERBATIM_MARKER = "User-provided verbatim (deterministic test fixture):";
+
 export interface SkillWorkflowCommand {
   readonly command: string;
+  readonly args: readonly string[];
   readonly exitCode: number;
   readonly envelope: CliMachineEnvelope;
 }
@@ -49,6 +53,10 @@ function requireSkillPolicy(skill: string): void {
     "Use `--json` for every command.",
     "Treat calibration and validation mutations as human decisions.",
     "ask for an explicit user decision before calling `board calibrate`, `validation add`, or `validation complete`",
+    "Manual import authenticity",
+    "Never invent, complete, rewrite, translate, paraphrase, synthesize, or infer manual-import text",
+    "Never treat agent reasoning, examples, fixtures, or test prompts as real evidence",
+    "same user turn do not count as multiple independent sources",
   ];
   for (const rule of requiredRules) {
     if (!skill.includes(rule)) throw new Error(`Skill is missing required workflow policy: ${rule}`);
@@ -65,7 +73,12 @@ async function execute(
   trace: SkillWorkflowCommand[],
 ): Promise<CliMachineEnvelope> {
   const result = await invoke(args, workspace);
-  trace.push({ command: commandName(result.envelope), exitCode: result.exitCode, envelope: result.envelope });
+  trace.push({
+    command: commandName(result.envelope),
+    args: [...args],
+    exitCode: result.exitCode,
+    envelope: result.envelope,
+  });
   return result.envelope;
 }
 
@@ -81,6 +94,20 @@ function findString(value: unknown, key: string): string | undefined {
   return undefined;
 }
 
+/** Extract user-provided verbatim strings from a Skill eval prompt. */
+export function extractUserProvidedVerbatims(prompt: string): string[] {
+  const texts: string[] = [];
+  const pattern = /User-provided verbatim(?:\s*\(deterministic test fixture\))?:\s*"([^"]+)"/gi;
+  for (const match of prompt.matchAll(pattern)) {
+    if (match[1]) texts.push(match[1]);
+  }
+  return texts;
+}
+
+function manualImportFlags(texts: readonly string[]): string[] {
+  return texts.flatMap((text) => ["--manual-import", text]);
+}
+
 async function prepareOpportunity(workspace: string): Promise<{ opportunityId: string; runId: string }> {
   await invoke(["brief", "create", "skill-validation", "--title", "Skill validation"], workspace);
   const run = await invoke(["run", "skill-validation", "--fixture"], workspace);
@@ -91,19 +118,61 @@ async function prepareOpportunity(workspace: string): Promise<{ opportunityId: s
   return { opportunityId: opportunities[0].id, runId };
 }
 
+function discoveryResponse(evidenceCount: number, incomplete: boolean, importedVerbatims: number): string {
+  const lines = [
+    `Stored evidence: ${evidenceCount} inspectable item(s).`,
+    "Inference: conclusions remain conditional on retained provenance.",
+    "Contradictory evidence: none stored.",
+  ];
+  if (incomplete || evidenceCount === 0) {
+    if (importedVerbatims > 0) {
+      lines.push("Partial result: imported user-provided verbatim materials, but coverage or public corroboration remains incomplete.");
+      lines.push("Unresolved uncertainty: willingness to pay and independent public sources remain untested.");
+      if (importedVerbatims > 1) {
+        lines.push("Note: multiple manual imports from the same user turn are one manual lane, not cross-source corroboration.");
+      }
+    } else {
+      lines.push("Partial result: public qualitative sources returned no usable evidence or were incomplete.");
+      lines.push("Unresolved uncertainty: qualitative demand and willingness to pay remain untested; no user-provided manual imports were available.");
+    }
+  } else if (importedVerbatims > 1) {
+    lines.push("Unresolved uncertainty: willingness to pay remains untested.");
+    lines.push("Note: multiple manual imports from the same user turn are one manual lane, not cross-source corroboration.");
+  } else {
+    lines.push("Unresolved uncertainty: willingness to pay remains untested.");
+  }
+  return lines.join("\n");
+}
+
 export async function runSkillWorkflow(input: WorkflowInput): Promise<SkillWorkflowTrace> {
   const skill = await readFile(input.skillPath, "utf8");
   requireSkillPolicy(skill);
   const workspace = await mkdtemp(path.join(os.tmpdir(), "idea-finder-skill-eval-"));
   const commands: SkillWorkflowCommand[] = [];
   try {
-    if (/发现|discover/i.test(input.prompt)) {
+    if (/发现|discover|User-provided verbatim/i.test(input.prompt)) {
+      const verbatims = extractUserProvidedVerbatims(input.prompt);
+      const sourcesUnavailable = /公开来源也不可用|sources? (?:are )?unavailable|do not use network/i.test(input.prompt);
       await execute(["workspace", "diagnostics"], workspace, commands);
-      await execute([
-        "brief", "create", "agent-coding-demand",
-        "--title", "Agent coding demand",
-        "--manual-import", "Agent coding coordination is painful and this manual workaround repeats every week.",
-      ], workspace, commands);
+      const briefArgs = verbatims.length > 0
+        ? [
+            "brief", "create", "agent-coding-demand",
+            "--title", "Agent coding demand",
+            ...manualImportFlags(verbatims),
+          ]
+        : sourcesUnavailable
+          ? [
+              "brief", "create", "agent-coding-demand",
+              "--title", "Agent coding demand",
+            ]
+          : [
+              "brief", "create", "agent-coding-demand",
+              "--title", "Agent coding demand",
+              "--source", "hn",
+              "--source", "stack_exchange",
+              "--term", "agent coding",
+            ];
+      await execute(briefArgs, workspace, commands);
       const run = await execute(["research", "run", "agent-coding-demand"], workspace, commands);
       const runId = findString(run.data, "runId");
       if (!runId) throw new Error("Research command did not return a runId");
@@ -111,9 +180,11 @@ export async function runSkillWorkflow(input: WorkflowInput): Promise<SkillWorkf
       const evidenceCount = Array.isArray((inspected.data as { details?: unknown[] }).details)
         ? (inspected.data as { details: unknown[] }).details.length
         : 0;
+      const incomplete = commands.some((command) => command.command.startsWith("research") && command.exitCode === 6)
+        || evidenceCount === 0;
       return {
         commands,
-        response: `Stored evidence: ${evidenceCount} inspectable item(s).\nInference: repeated coordination pain is a candidate demand signal.\nContradictory evidence: none stored.\nUnresolved uncertainty: willingness to pay remains untested.`,
+        response: discoveryResponse(evidenceCount, incomplete, verbatims.length),
         pausedForHumanDecision: false,
       };
     }

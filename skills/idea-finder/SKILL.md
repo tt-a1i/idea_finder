@@ -19,6 +19,11 @@ Read [references/cli-workflows.md](references/cli-workflows.md) for installation
 6. Keep conclusions conditional whenever coverage or evidence is incomplete.
 7. Default to live research. Never pass `--fixture` or `--fixture-set` when the user asks for real/live research. Fixtures are only for demos and deterministic tests.
 8. Never invent or paste fixture data to fill gaps left by failed, throttled, unauthorized, or zero-result sources.
+9. Manual import authenticity: pass `--manual-import` only for text the user explicitly provided in this turn, text from a user-specified file, or existing material the user explicitly authorized for import.
+10. Never invent, complete, rewrite, translate, paraphrase, synthesize, or infer manual-import text. Import user-provided text verbatim; do not add pain, workaround, willingness-to-pay, persona, frequency, or source details the user did not supply.
+11. Never treat agent reasoning, examples, fixtures, or test prompts as real evidence.
+12. When the user provides no manual materials, use real public sources. If those sources fail or are unavailable, keep an empty or `partial` result, list missing sources under `Partial result:` / `Unresolved uncertainty:`, and do not call `--manual-import` to fill the gap.
+13. Multiple manual imports from the same user turn do not count as multiple independent sources; they remain one `manual` provenance lane and must not be presented as cross-source corroboration.
 
 ## Choose sources by claim
 
