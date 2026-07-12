@@ -1,10 +1,27 @@
 # idea_finder
 
-Local-first, evidence-native personal demand workspace (implementation in progress).
+Local-first, Agent-native Broad Demand Discovery CLI + Skill.
 
 ## Prerequisites
 
 - Node.js 22.5+
+
+## Five-minute Agent quickstart
+
+```bash
+npm install
+npm run build
+npm pack
+npm install -g ./idea-finder-0.0.0.tgz
+WORKSPACE="$(pwd)/.idea-finder-workspace"
+idea-finder workspace diagnostics --workspace "$WORKSPACE" --init --json
+idea-finder plan propose --topic "agent coding workflows" --workspace "$WORKSPACE" --json
+idea-finder plan confirm <planId> --mode start_now --slug agent-workflows --workspace "$WORKSPACE" --json
+idea-finder research run agent-workflows --workspace "$WORKSPACE" --json
+idea-finder export agent-workflows --workspace "$WORKSPACE" --json
+```
+
+Natural-language Skill path: `topic → plan propose → human confirmation → broad research → inspect → pain map`.
 
 ## Scripts
 
@@ -18,6 +35,7 @@ Local-first, evidence-native personal demand workspace (implementation in progre
 | `npm run lint` | Typecheck + test (Wave 1 gate; no ESLint yet) |
 | `npm run release:gate` | Run the deterministic CLI + Skill release gate |
 | `npm run test:skill-agent` | Run the live Skill evaluation with an authenticated Codex CLI |
+| `npm run test:live-smoke` | Optional live connector smoke (`IDEA_FINDER_LIVE_SMOKE=1`) |
 
 ## Package layout
 
@@ -25,16 +43,17 @@ Architectural seams under `packages/`:
 
 | Package | Role |
 |---------|------|
-| `@idea-finder/core` | Domain types (owned by domain task) + shared ports |
-| `@idea-finder/storage` | Blob, queue, audit port interfaces |
+| `@idea-finder/core` | Domain types + shared ports |
+| `@idea-finder/storage` | Canonical SQLite + blob/queue/audit |
 | `@idea-finder/llm` | LLM provider port |
 | `@idea-finder/agents` | Agent connector port, PolicyEngine, AgentGateway |
-| `@idea-finder/connectors` | Source connector port |
-| `@idea-finder/harvest` | Ingest pipeline placeholder |
-| `@idea-finder/intelligence` | Embed/cluster/extract placeholder |
-| `@idea-finder/orchestration` | Run DAG / scheduling placeholder |
+| `@idea-finder/connectors` | Source connectors (HN, V2EX, SE, App Store, GitHub Issues/metrics, …) |
+| `@idea-finder/harvest` | Harvest pipeline |
+| `@idea-finder/intelligence` | Clustering / evidence builders |
+| `@idea-finder/orchestration` | ResearchRun orchestration |
+| `@idea-finder/workspace` | Standalone CLI + workspace service |
 
-Runtime data lives under `data/` (gitignored).
+Default workspace is a stable user-data directory (or `IDEA_FINDER_WORKSPACE` / `--workspace`). Always pass an explicit `--workspace` from Agent workflows.
 
 ## Agent gateway (Wave 3)
 

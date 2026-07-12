@@ -71,7 +71,7 @@ Store manual, daily, or weekly cadence with `monitor schedule`. Let Codex Automa
 
 ## Write the response
 
-Separate facts from interpretation:
+Prefer a pain-map oriented summary for discovery results (topic, coverage stats, clusters with quotes/URLs). Separate facts from interpretation:
 
 - `Stored evidence:` cite inspect-returned provenance.
 - `Inference:` explain reasoning not directly stated by a source.
@@ -80,4 +80,4 @@ Separate facts from interpretation:
 - `Partial result:` list incomplete lanes and retained successful lanes.
 - `Unresolved uncertainty:` state what still needs research or validation.
 
-Never claim an Opportunity is validated merely because it was admitted, promoted, trending, or scheduled for validation.
+Never claim an Opportunity is validated merely because it was admitted, promoted, trending, or scheduled for validation. Never present stars, downloads, ranks, or search heat as validated pain.

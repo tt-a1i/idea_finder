@@ -121,3 +121,25 @@ idea-finder monitor run agent-demand --json
 ```
 
 The first invocation establishes a baseline. Later invocations create distinct ResearchRuns and return a persisted comparison with coverage, evidence changes, notification reasons, and cooling suppression.
+
+## Five-minute Agent quickstart
+
+```bash
+npm pack && npm install -g ./idea-finder-0.0.0.tgz
+WORKSPACE="$PWD/idea-finder-workspace"
+idea-finder workspace diagnostics --workspace "$WORKSPACE" --init --json
+idea-finder plan propose --topic "agent coding workflows" --language en --language zh --workspace "$WORKSPACE" --json
+# Wait for user confirmation, then:
+idea-finder plan confirm <planId> --mode start_now --slug agent-workflows --workspace "$WORKSPACE" --json
+idea-finder research run agent-workflows --workspace "$WORKSPACE" --json
+idea-finder research inspect <runId> --workspace "$WORKSPACE" --json
+idea-finder export agent-workflows --workspace "$WORKSPACE" --json
+```
+
+Partial source failures remain inspectable (`status: partial`, exit 6). Import Agent-opened evidence with:
+
+```bash
+idea-finder evidence ingest-fetched --run <runId> --json-file ./fetched.json --workspace "$WORKSPACE" --json
+```
+
+`fetched.json` must include sourceType, canonicalUrl, retrievedAt, verbatimQuote, rawSnapshot or replayRef, queryId, collectionMethod, and externalId.
