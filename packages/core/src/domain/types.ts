@@ -19,7 +19,7 @@ import type {
 } from "./ids.js";
 
 export type SourceTier = "L0" | "L1" | "L2" | "L3";
-export type FetchMethod = "api" | "rss" | "import" | "browser_agent";
+export type FetchMethod = "api" | "rss" | "import" | "browser_agent" | "agent_fetched" | "fixture";
 export type RetentionClass = "ephemeral" | "standard" | "pinned";
 export type LegalBasis = "personal_research" | "user_provided" | "public_api_tos";
 

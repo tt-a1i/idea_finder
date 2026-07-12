@@ -22,6 +22,8 @@ import {
   detectLatestTrendEvent,
   DEFAULT_MONITOR_THRESHOLDS,
   startValidationExperiment as markValidationExperimentRunning,
+  toAgentFetchedRawDocument,
+  type AgentFetchedEvidenceInput,
 } from "@idea-finder/core";
 import { createGitHubQuantitativeConnector, createGoogleTrendsConnector, createNpmDownloadsConnector, createPyPiDownloadsConnector, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import { join } from "node:path";
@@ -545,6 +547,47 @@ export class WorkspaceService {
     } finally {
       storage.close();
     }
+  }
+
+  async ingestAgentFetchedEvidence(input: AgentFetchedEvidenceInput & { readonly runId: ResearchRunId }): Promise<{
+    readonly document: import("@idea-finder/core").RawDocument;
+    readonly idempotent: boolean;
+  }> {
+    const document = toAgentFetchedRawDocument(input);
+    const storage = this.openCanonical();
+    try {
+      const existing = storage.rawDocuments.get(input.runId, document.id);
+      if (existing) {
+        return { document: existing, idempotent: true };
+      }
+      storage.rawDocuments.save(input.runId, document);
+      return { document, idempotent: false };
+    } finally {
+      storage.close();
+    }
+  }
+
+  async listRunDocuments(runId: ResearchRunId, options: { readonly fetchedOnly?: boolean } = {}): Promise<import("@idea-finder/core").RawDocument[]> {
+    const storage = this.openCanonical();
+    try {
+      const documents = storage.rawDocuments.listByRun(runId);
+      return options.fetchedOnly ? documents.filter((document) => document.fetchMethod === "agent_fetched") : documents;
+    } finally {
+      storage.close();
+    }
+  }
+
+  async getRunDocument(runId: ResearchRunId, documentId: string): Promise<import("@idea-finder/core").RawDocument | null> {
+    const storage = this.openCanonical();
+    try {
+      return storage.rawDocuments.get(runId, documentId);
+    } finally {
+      storage.close();
+    }
+  }
+
+  async listAgentFetchedEvidence(runId: ResearchRunId): Promise<import("@idea-finder/core").RawDocument[]> {
+    return this.listRunDocuments(runId, { fetchedOnly: true });
   }
 
   async getBrief(slugOrId: string): Promise<HuntingBrief | null> {

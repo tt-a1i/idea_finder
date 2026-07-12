@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentKind } from "@idea-finder/agents";
 import { createAuthorizedHttpGoogleTrendsTransport, GoogleTrendsSourceError, PackageDownloadsSourceError, type GoogleTrendsTransport, type PackageDownloadsConnector, type QuantitativeConnector } from "@idea-finder/connectors";
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
+import { InvariantViolation } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
 import type { ResearchSourceStatus } from "../types.js";
@@ -75,6 +76,9 @@ Usage:
   idea-finder plan propose --topic <text> [--persona <text> ...] [--scenario <text> ...] [--language <code> ...] [--geo <CC|WORLDWIDE>] [--from <iso>] [--to <iso>] [--source-family <name> ...] [--query-budget <n>] [--document-budget <n>] [--round-budget <n>]
   idea-finder plan confirm <planId> [--mode <explicit|start_now>] [--slug <slug>] [--no-brief]
   idea-finder plan inspect <planId>
+  idea-finder evidence ingest-fetched --run <runId> --json-file <path>
+  idea-finder evidence list --run <runId> [--fetched-only]
+  idea-finder evidence inspect <documentId> --run <runId>
   idea-finder export <brief> [--out <path.md>]
   idea-finder agent list
   idea-finder agent create --kind <research|browser|computer|coding> --intent <text> [--opportunity <id>] [--evidence <id,id>] [--domain-write] [--dry-run]
@@ -191,6 +195,9 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "plan propose": { valueFlags: ["--topic", "--persona", "--scenario", "--language", "--geo", "--from", "--to", "--source-family", "--query-budget", "--document-budget", "--round-budget"], positionalCount: 2 },
   "plan confirm": { valueFlags: ["--mode", "--slug"], booleanFlags: ["--no-brief"], positionalCount: 3 },
   "plan inspect": { valueFlags: [], positionalCount: 3 },
+  "evidence ingest-fetched": { valueFlags: ["--run", "--json-file"], positionalCount: 2 },
+  "evidence list": { valueFlags: ["--run"], booleanFlags: ["--fetched-only"], positionalCount: 2 },
+  "evidence inspect": { valueFlags: ["--run"], positionalCount: 3 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
   "agent list": { valueFlags: [], positionalCount: 2 },
   "agent create": { valueFlags: ["--kind", "--intent", "--opportunity", "--evidence"], booleanFlags: ["--domain-write", "--dry-run"], positionalCount: 2 },
@@ -664,6 +671,71 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       command: "plan inspect",
       data: { plan },
       human: `${plan.id}\tv${plan.version}\t${plan.status}\t${plan.topic}`,
+    };
+  }
+
+  if (cmd === "evidence" && sub === "ingest-fetched") {
+    const runId = required(flag(rest, "--run"), "evidence.run_required", "--run is required");
+    const jsonFile = required(flag(rest, "--json-file"), "evidence.json_file_required", "--json-file is required");
+    const raw = await readFile(jsonFile, "utf8");
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      throw new CliFailure("validation", "evidence.json_invalid", "--json-file must contain valid JSON", CLI_EXIT_CODES.validation);
+    }
+    const briefId = typeof payload.huntingTaskId === "string" ? payload.huntingTaskId : `task_${runId}`;
+    try {
+      const result = await svc(workspaceDir).ingestAgentFetchedEvidence({
+        sourceType: String(payload.sourceType ?? ""),
+        canonicalUrl: String(payload.canonicalUrl ?? ""),
+        title: String(payload.title ?? ""),
+        author: payload.author === null || payload.author === undefined ? null : String(payload.author),
+        anonymous: Boolean(payload.anonymous),
+        publishedAt: payload.publishedAt === undefined ? null : String(payload.publishedAt),
+        updatedAt: payload.updatedAt === undefined ? null : String(payload.updatedAt),
+        retrievedAt: String(payload.retrievedAt ?? ""),
+        verbatimQuote: String(payload.verbatimQuote ?? ""),
+        rawSnapshot: payload.rawSnapshot === undefined ? undefined : String(payload.rawSnapshot),
+        replayRef: payload.replayRef === undefined ? undefined : String(payload.replayRef),
+        queryId: String(payload.queryId ?? ""),
+        collectionMethod: String(payload.collectionMethod ?? ""),
+        externalId: String(payload.externalId ?? ""),
+        huntingTaskId: briefId as never,
+        runId: runId as never,
+      });
+      return {
+        command: "evidence ingest-fetched",
+        data: { document: result.document, idempotent: result.idempotent, provenance: "agent_fetched" },
+        human: `${result.idempotent ? "Idempotent" : "Ingested"} agent-fetched evidence ${result.document.id}`,
+      };
+    } catch (error) {
+      if (error instanceof InvariantViolation) {
+        throw new CliFailure("validation", error.code, error.message, CLI_EXIT_CODES.validation);
+      }
+      throw error;
+    }
+  }
+
+  if (cmd === "evidence" && sub === "list") {
+    const runId = required(flag(rest, "--run"), "evidence.run_required", "--run is required");
+    const documents = await svc(workspaceDir).listRunDocuments(runId as never, { fetchedOnly: has(rest, "--fetched-only") });
+    return {
+      command: "evidence list",
+      data: { documents, count: documents.length },
+      human: `Evidence documents: ${documents.length}`,
+    };
+  }
+
+  if (cmd === "evidence" && sub === "inspect") {
+    const documentId = required(rest[0], "evidence.id_required", "evidence inspect requires <documentId>");
+    const runId = required(flag(rest, "--run"), "evidence.run_required", "--run is required");
+    const document = await svc(workspaceDir).getRunDocument(runId as never, documentId);
+    if (!document) throw new CliFailure("missing-resource", "evidence.not_found", `Document not found: ${documentId}`, CLI_EXIT_CODES.missingResource, { documentId, runId });
+    return {
+      command: "evidence inspect",
+      data: { document, provenance: document.fetchMethod },
+      human: `${document.id}\t${document.fetchMethod}\t${document.url}`,
     };
   }
 
