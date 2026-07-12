@@ -32,6 +32,9 @@ export interface PackageDownloadCollection {
   readonly to: string;
   readonly buckets: readonly CollectedPackageDownload[];
   readonly provenance: PackageDownloadProvenance;
+  /** Days in the requested window with no provider row (never filled with synthetic zeros). */
+  readonly missingDays: readonly string[];
+  readonly coverageComplete: boolean;
 }
 export interface PackageDownloadsConnector {
   readonly ecosystem: PackageEcosystem;

@@ -108,8 +108,15 @@ function quantitativeSourceStatus(input: { id: string; source: string; status?: 
 
 function failedQuantitativeSourceStatus(id: string, source: string, error: unknown, startedAt: string): ResearchSourceStatus {
   const reason = error instanceof Error ? error.message : String(error);
-  const lower = reason.toLowerCase();
-  const status: ResearchSourceStatus["status"] = /authoriz|credential|401|token required/.test(lower) ? "unauthorized" : /thrott|rate.?limit|429|retry-after/.test(lower) ? "throttled" : /unavailable|timeout|network|fetch failed|http 5\d\d/.test(lower) ? "unavailable" : "failure";
+  const statusField = typeof error === "object" && error !== null && "status" in error
+    ? String((error as { status?: unknown }).status ?? "")
+    : "";
+  const lower = `${reason} ${statusField}`.toLowerCase();
+  const status: ResearchSourceStatus["status"] =
+    /authoriz|credential|401|token required/.test(lower) ? "unauthorized"
+      : /thrott|rate.?limit|429|retry-after/.test(lower) ? "throttled"
+        : /unavailable|timeout|network|fetch failed|http 5\d\d|unavailable_history|incomplete coverage/.test(lower) ? "unavailable"
+          : "failure";
   const retryAt = typeof error === "object" && error !== null ? ((error as { retryAt?: unknown; resetAt?: unknown }).retryAt ?? (error as { resetAt?: unknown }).resetAt) : null;
   return quantitativeSourceStatus({ id, source, status, reason, startedAt, retryAt: typeof retryAt === "string" ? retryAt : null });
 }
@@ -1107,20 +1114,25 @@ export class WorkspaceService {
     to: string;
     connector?: PackageDownloadsConnector;
     runSource?: RunSourceCheckpoint;
-  }): Promise<{ observations: PackageDownloadObservation[]; series: PackageDownloadSeries; event: TrendEvent | null }> {
+    now?: () => Date;
+  }): Promise<{ observations: PackageDownloadObservation[]; series: PackageDownloadSeries; event: TrendEvent | null; missingDays: readonly string[]; coverageComplete: boolean }> {
     const canonicalName = canonicalizePackageName(input.ecosystem, input.packageName);
     const connector = input.connector ?? (input.ecosystem === "npm" ? createNpmDownloadsConnector() : createPyPiDownloadsConnector());
     const statusId = `package:${createHash("sha256").update(`${input.ecosystem}|${canonicalName}|${input.from}|${input.to}`).digest("hex").slice(0, 24)}`;
+    const clock = input.now ?? (() => new Date());
     try {
       const collected = await connector.collect({ package: input.packageName, from: input.from, to: input.to });
+      const missingDays = collected.missingDays ?? [];
+      const coverageComplete = collected.coverageComplete ?? missingDays.length === 0;
       const observations = collected.buckets.map((item) => {
         const startAt = new Date(`${item.day}T00:00:00.000Z`);
         const endAt = new Date(startAt.getTime() + 86_400_000);
+        const incomplete = endAt.getTime() > clock().getTime();
         return createPackageDownloadObservation({
           id: asId(`metric_${createHash("sha256").update(`${item.ecosystem}|${collected.package}|${startAt.toISOString()}|${endAt.toISOString()}|bucket_count_to_daily_rate_v1`).digest("hex").slice(0, 24)}`),
           ecosystem: item.ecosystem,
           packageName: collected.package,
-          bucket: { startAt: startAt.toISOString(), endAt: endAt.toISOString(), resolution: "day", timezone: "UTC", coverageDays: 1, partial: false },
+          bucket: { startAt: startAt.toISOString(), endAt: endAt.toISOString(), resolution: "day", timezone: "UTC", coverageDays: 1, partial: incomplete },
           downloads: item.downloads,
           provenance: {
             collector: item.provenance.provider,
@@ -1128,7 +1140,10 @@ export class WorkspaceService {
             interface: item.provenance.interface === "recorded_fixture" ? "recorded_fixture" : item.provenance.provider === "npm" ? "npm_downloads_api" : "pypistats_public_api",
             sourceRef: item.provenance.sourceRef,
             collectedAt: item.provenance.retrievedAt,
-            caveat: item.provenance.caveat,
+            caveat: [
+              item.provenance.caveat,
+              incomplete ? `Incomplete UTC day ${item.day}; excluded from momentum until the bucket ends` : null,
+            ].filter(Boolean).join("; ") || null,
           },
         });
       });
@@ -1157,6 +1172,7 @@ export class WorkspaceService {
         const previousSeries = storage.trendSeries.list({ ecosystem: input.ecosystem, packageName: subject.canonicalName })
           .filter((item): item is PackageDownloadSeries => item.source === "npm_registry" || item.source === "pypi");
         const nextSeriesIds = new Set(builtSeries.map((item) => item.series.id));
+        const coverageReason = missingDays.length > 0 ? `Incomplete coverage; missing days: ${missingDays.join(", ")}` : null;
         commitQuantitative(storage, () => {
           for (const observation of observations) storage.metricObservations.save(observation);
           for (const stale of previousSeries.filter((item) => !nextSeriesIds.has(item.id))) {
@@ -1165,14 +1181,36 @@ export class WorkspaceService {
           }
           for (const candidate of builtSeries) storage.trendSeries.save(candidate.series);
           if (event) storage.trendEvents.append(event);
-          storage.quantitativeSourceStatuses.save({ id: statusId, source: input.ecosystem === "npm" ? "npm_registry" : "pypi", subjectExternalId: subject.externalId, status: "success", itemCount: observations.length, reason: null, checkedAt: collected.provenance.retrievedAt, ecosystem: input.ecosystem, packageName: subject.canonicalName, from: collected.from, to: collected.to, provenance: collected.provenance });
-          if (input.runSource) storage.sourceStatuses.save(input.runSource.runId, quantitativeSourceStatus({ ...input.runSource, itemCount: observations.length, artifactIds: [built.series.id, ...built.series.observationIds] }));
+          storage.quantitativeSourceStatuses.save({
+            id: statusId,
+            source: input.ecosystem === "npm" ? "npm_registry" : "pypi",
+            subjectExternalId: subject.externalId,
+            status: coverageComplete ? "success" : "partial",
+            itemCount: observations.length,
+            reason: coverageReason,
+            checkedAt: collected.provenance.retrievedAt,
+            ecosystem: input.ecosystem,
+            packageName: subject.canonicalName,
+            from: collected.from,
+            to: collected.to,
+            provenance: collected.provenance,
+          });
+          if (input.runSource) {
+            storage.sourceStatuses.save(input.runSource.runId, quantitativeSourceStatus({
+              ...input.runSource,
+              status: coverageComplete ? "success" : "unavailable",
+              itemCount: observations.length,
+              reason: coverageReason,
+              artifactIds: [built.series.id, ...built.series.observationIds],
+            }));
+          }
         });
-        return { observations, series: built.series, event };
+        return { observations, series: built.series, event, missingDays, coverageComplete };
       } finally {
         storage.close();
       }
     } catch (error) {
+      // Persistence failures must not erase connector-level diagnosis; callers may still salvage a partial report.
       if (error instanceof QuantitativePersistenceError) throw error;
       const status = error instanceof PackageDownloadsSourceError ? error.status : "response_drift";
       const storage = this.openCanonical();
@@ -1251,24 +1289,46 @@ export class WorkspaceService {
     const previousReport = previousStorage.multiLaneReports.getByRun(stored.run.id);
     const previousFollowUps = previousStorage.followUpProposals.listByRun(stored.run.id);
     previousStorage.close();
-    const claims: ResearchClaim[] = stored.evidence.map((evidence) => {
+    const claims: ResearchClaim[] = [];
+    const claimBuildFailures: string[] = [];
+    for (const evidence of stored.evidence) {
       const lane: ResearchLane = evidence.supportsClaim === "wtp" ? "commercial_intent" : evidence.supportsClaim === "disconfirming" ? "contradictory_evidence" : "qualitative_demand";
-      return buildResearchClaim({
-        id: `claim_${stored.run.id}_${evidence.id}`,
-        lane,
-        statement: evidence.quoteVerbatim,
-        status: lane === "contradictory_evidence" ? "contradicted" : "validated",
-        evidenceRefs: [{ kind: "text_quote", evidenceItemId: evidence.id, chunkId: evidence.chunkId, documentId: evidence.documentId, url: evidence.url }],
-        independentSourceGroupIds: groupByDocument.get(evidence.documentId) ? [groupByDocument.get(evidence.documentId)!] : [],
-        limitations: [],
-      });
-    });
+      const document = stored.documents.find((item) => item.id === evidence.documentId);
+      const url = (evidence.url?.trim() || document?.url?.trim() || "");
+      if (!url || !evidence.chunkId?.trim()) {
+        claimBuildFailures.push(`${evidence.id}: missing chunk/URL for text quote claim`);
+        continue;
+      }
+      try {
+        claims.push(buildResearchClaim({
+          id: `claim_${stored.run.id}_${evidence.id}`,
+          lane,
+          statement: evidence.quoteVerbatim,
+          status: lane === "contradictory_evidence" ? "contradicted" : "validated",
+          evidenceRefs: [{ kind: "text_quote", evidenceItemId: evidence.id, chunkId: evidence.chunkId, documentId: evidence.documentId, url }],
+          independentSourceGroupIds: groupByDocument.get(evidence.documentId) ? [groupByDocument.get(evidence.documentId)!] : [],
+          limitations: evidence.url?.trim() ? [] : ["Claim URL recovered from source document because evidence.url was empty"],
+        }));
+      } catch (error) {
+        claimBuildFailures.push(`${evidence.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     claims.push(...(previousReport?.claims.filter((claim) => !claim.evidenceRefs.some((ref) => ref.kind === "text_quote")) ?? []));
     const quantitativeSeries: TrendSeries[] = [...(previousReport?.seriesSnapshots ?? [])];
     const quantitativeObservations: MetricObservation[] = [...(previousReport?.observationSnapshots ?? [])];
     const githubStarObservations: Array<{ repository: string; observation: GitHubMetricObservation }> = [];
     const followUps: FollowUpHuntingTaskProposal[] = [...previousFollowUps];
     const sourceStatuses = new Map((stored.sourceStatuses ?? []).map((status) => [status.id, status]));
+    if (claimBuildFailures.length > 0) {
+      sourceStatuses.set("claim:build", quantitativeSourceStatus({
+        id: "claim:build",
+        source: "qualitative_claims",
+        status: "unavailable",
+        itemCount: claims.filter((claim) => claim.evidenceRefs.some((ref) => ref.kind === "text_quote")).length,
+        reason: `Skipped ${claimBuildFailures.length} qualitative claim(s): ${claimBuildFailures.slice(0, 3).join("; ")}`,
+        startedAt: stored.run.startedAt ?? new Date().toISOString(),
+      }));
+    }
     const previousArtifactIds = new Set<string>([...(previousReport?.seriesSnapshots.map((item) => item.id) ?? []), ...(previousReport?.observationSnapshots.map((item) => item.id) ?? [])]);
     const hasReportedCheckpoint = (requestKey: string): boolean => {
       const status = sourceStatuses.get(requestKey);
@@ -1303,7 +1363,12 @@ export class WorkspaceService {
       addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "trend_momentum", statement: `${request.subject}: ${result.event.kind}`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Search momentum is not validated demand"] }));
       if (["spike", "sustained_growth"].includes(result.event.kind)) addFollowUp(proposeFollowUpHuntingTask({ triggerEventId: result.event.id, triggerSeriesId: result.series.id, triggerKind: result.event.kind as "spike" | "sustained_growth", subject: request.subject }));
       sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: "google_trends", itemCount: result.observations.length, startedAt, artifactIds: [result.series.id, ...result.observations.map((item) => item.id)] }));
-      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "google_trends", error, startedAt)); }
+      } catch (error) {
+        // Lane-level persistence failures must not abort the multi-lane report: record the
+        // failed status and continue so successful lanes remain inspectable.
+        const cause = error instanceof QuantitativePersistenceError ? error.original : error;
+        sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "google_trends", cause, startedAt));
+      }
     }
     for (const [index, request] of (plan.github ?? []).entries()) {
       const requestKey = `quant:github:${index}`;
@@ -1326,27 +1391,34 @@ export class WorkspaceService {
         addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${series.id}`, lane: "supply_competition", statement: `${request.repository} ${series.metric}: ${series.observationIds.length} observations`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: series.id, observationIds: series.observationIds }], independentSourceGroupIds: [], limitations: ["GitHub popularity is not validated demand"] }));
       }
       sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: "github", itemCount: result.observations.length, startedAt, artifactIds: [...result.series.map((item) => item.id), ...result.observations.map((item) => item.id)] }));
-      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "github", error, startedAt)); }
+      } catch (error) {
+        const cause = error instanceof QuantitativePersistenceError ? error.original : error;
+        sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, "github", cause, startedAt));
+      }
     }
     const rankingUniverse = githubStarObservations.map((item) => item.repository).sort();
-    for (const [index, item] of [...githubStarObservations].sort((a, b) => b.observation.normalizedValue - a.observation.normalizedValue || a.repository.localeCompare(b.repository)).entries()) {
-      const rank = index + 1;
-      const observation = createGitHubMetricObservation({
-        id: asId(`metric_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`),
-        subject: { kind: "repository", externalId: `${item.repository.toLowerCase()}#brief:${stored.run.id}`, url: `https://github.com/${item.repository}` },
-        metric: "trending_rank", geography: null, observedAt: item.observation.observedAt, rawValue: rank, normalizedValue: rank,
-        provenance: { collector: "idea-finder-github-brief-ranking", collectorVersion: "1", interface: "github_rest_api", sourceRef: item.observation.provenance.sourceRef, collectedAt: item.observation.provenance.collectedAt },
-      });
-      const series = buildTrendSeries(asId(`trend_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`), [observation]).series;
-      const rankingStorage = this.openCanonical();
-      try { rankingStorage.transaction(() => { rankingStorage.metricObservations.save(observation); rankingStorage.trendSeries.save(series); }); } finally { rankingStorage.close(); }
-      addObservations([observation]); addSeries(series);
-      addClaim(buildResearchClaim({
-        id: `claim_${stored.run.id}_${series.id}_ranking`, lane: "supply_competition",
-        statement: `${item.repository} star rank: ${rank} of ${rankingUniverse.length} in Brief comparison universe [${rankingUniverse.join(", ")}]`,
-        status: "unvalidated", evidenceRefs: [{ kind: "ranking_snapshot", observationId: observation.id, sourceUrl: observation.provenance.sourceRef }],
-        independentSourceGroupIds: [], limitations: ["Brief-relative star ranking is supply evidence, not validated demand"],
-      }));
+    try {
+      for (const [index, item] of [...githubStarObservations].sort((a, b) => b.observation.normalizedValue - a.observation.normalizedValue || a.repository.localeCompare(b.repository)).entries()) {
+        const rank = index + 1;
+        const observation = createGitHubMetricObservation({
+          id: asId(`metric_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`),
+          subject: { kind: "repository", externalId: `${item.repository.toLowerCase()}#brief:${stored.run.id}`, url: `https://github.com/${item.repository}` },
+          metric: "trending_rank", geography: null, observedAt: item.observation.observedAt, rawValue: rank, normalizedValue: rank,
+          provenance: { collector: "idea-finder-github-brief-ranking", collectorVersion: "1", interface: "github_rest_api", sourceRef: item.observation.provenance.sourceRef, collectedAt: item.observation.provenance.collectedAt },
+        });
+        const series = buildTrendSeries(asId(`trend_${stored.run.id}_${item.repository.replace(/\W/g, "_")}_brief_rank`), [observation]).series;
+        const rankingStorage = this.openCanonical();
+        try { rankingStorage.transaction(() => { rankingStorage.metricObservations.save(observation); rankingStorage.trendSeries.save(series); }); } finally { rankingStorage.close(); }
+        addObservations([observation]); addSeries(series);
+        addClaim(buildResearchClaim({
+          id: `claim_${stored.run.id}_${series.id}_ranking`, lane: "supply_competition",
+          statement: `${item.repository} star rank: ${rank} of ${rankingUniverse.length} in Brief comparison universe [${rankingUniverse.join(", ")}]`,
+          status: "unvalidated", evidenceRefs: [{ kind: "ranking_snapshot", observationId: observation.id, sourceUrl: observation.provenance.sourceRef }],
+          independentSourceGroupIds: [], limitations: ["Brief-relative star ranking is supply evidence, not validated demand"],
+        }));
+      }
+    } catch (error) {
+      sourceStatuses.set("quant:github:ranking", failedQuantitativeSourceStatus("quant:github:ranking", "github", error, new Date().toISOString()));
     }
     for (const [index, request] of (plan.packages ?? []).entries()) {
       const requestKey = `quant:${request.ecosystem}:${index}`;
@@ -1359,14 +1431,42 @@ export class WorkspaceService {
           const start = Date.parse(`${query.from}T00:00:00.000Z`); const end = Date.parse(`${query.to}T00:00:00.000Z`);
           const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: `fixture://multi-lane/${request.ecosystem}`, retrievedAt: "2026-01-10T00:00:00.000Z", caveat: "Recorded representative fixture" };
           const days = Array.from({ length: Math.floor((end - start) / 86_400_000) + 1 }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
-          return { ecosystem: request.ecosystem, package: query.package, from: query.from, to: query.to, provenance, buckets: days.map((day) => ({ id: `fixture_${request.ecosystem}_${day}`, ecosystem: request.ecosystem, package: query.package, subject: `${request.ecosystem}:${query.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })) };
+          return {
+            ecosystem: request.ecosystem,
+            package: query.package,
+            from: query.from,
+            to: query.to,
+            provenance,
+            buckets: days.map((day) => ({ id: `fixture_${request.ecosystem}_${day}`, ecosystem: request.ecosystem, package: query.package, subject: `${request.ecosystem}:${query.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })),
+            missingDays: [],
+            coverageComplete: true,
+          };
         },
       } : undefined;
-      const result = await this.collectPackageDownloads({ ecosystem: request.ecosystem, packageName: request.package, from: request.from, to: request.to, connector, runSource: { runId: stored.run.id, id: requestKey, source: request.ecosystem, startedAt } });
+      const result = await this.collectPackageDownloads({
+        ecosystem: request.ecosystem,
+        packageName: request.package,
+        from: request.from,
+        to: request.to,
+        connector,
+        runSource: { runId: stored.run.id, id: requestKey, source: request.ecosystem, startedAt },
+        now: fixture ? () => new Date("2026-01-11T00:00:00.000Z") : undefined,
+      });
       addSeries(result.series); addObservations(result.observations);
-      addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "supply_competition", statement: `${request.ecosystem}:${request.package} download momentum`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Download momentum is not validated demand", ...(request.ecosystem === "pypi" ? ["pypistats is a third-party public API"] : [])] }));
-      sourceStatuses.set(requestKey, quantitativeSourceStatus({ id: requestKey, source: request.ecosystem, itemCount: result.observations.length, startedAt, artifactIds: [result.series.id, ...result.series.observationIds] }));
-      } catch (error) { if (error instanceof QuantitativePersistenceError) throw error.original; sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, request.ecosystem, error, startedAt)); }
+      addClaim(buildResearchClaim({ id: `claim_${stored.run.id}_${result.series.id}`, lane: "supply_competition", statement: `${request.ecosystem}:${request.package} download momentum`, status: "unvalidated", evidenceRefs: [{ kind: "observation_series", seriesId: result.series.id, observationIds: result.series.observationIds }], independentSourceGroupIds: [], limitations: ["Download momentum is not validated demand", ...(request.ecosystem === "pypi" ? ["pypistats is a third-party public API"] : []), ...(result.missingDays.length ? [`Incomplete coverage; missing days: ${result.missingDays.join(", ")}`] : [])] }));
+      sourceStatuses.set(requestKey, quantitativeSourceStatus({
+        id: requestKey,
+        source: request.ecosystem,
+        status: result.coverageComplete ? "success" : "unavailable",
+        itemCount: result.observations.length,
+        reason: result.missingDays.length ? `Incomplete coverage; missing days: ${result.missingDays.join(", ")}` : null,
+        startedAt,
+        artifactIds: [result.series.id, ...result.series.observationIds],
+      }));
+      } catch (error) {
+        const cause = error instanceof QuantitativePersistenceError ? error.original : error;
+        sourceStatuses.set(requestKey, failedQuantitativeSourceStatus(requestKey, request.ecosystem, cause, startedAt));
+      }
     }
 
     const candidateFor = (kind: string, selected: ResearchClaim[], series: TrendSeries[]): MultiLaneCandidate => evaluateMultiLaneCandidate({ id: `candidate_${stored.run.id}_${kind}`, subject: brief.title, claims: selected, qualitativeEvidenceItemIds: [], quantitativeSeriesIds: series.map((item) => item.id), independentQualitativeSourceGroupIds: [] });

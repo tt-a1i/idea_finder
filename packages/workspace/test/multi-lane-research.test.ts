@@ -57,7 +57,7 @@ describe("multi-lane demand research", () => {
 
       const connector: PackageDownloadsConnector = { ecosystem: "npm", async collect(request) {
         const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: "fixture://later", retrievedAt: "2026-01-11T00:00:00.000Z", caveat: "Later collection" };
-        return { ecosystem: "npm", package: request.package, from: request.from, to: request.to, provenance, buckets: ["2026-01-04", "2026-01-05", "2026-01-06"].map((day, index) => ({ id: `later_${index}`, ecosystem: "npm" as const, package: request.package, subject: `npm:${request.package}`, day, downloads: 500 + index * 100, provenance })) };
+        return { ecosystem: "npm", package: request.package, from: request.from, to: request.to, provenance, buckets: ["2026-01-04", "2026-01-05", "2026-01-06"].map((day, index) => ({ id: `later_${index}`, ecosystem: "npm" as const, package: request.package, subject: `npm:${request.package}`, day, downloads: 500 + index * 100, provenance })), missingDays: [], coverageComplete: true };
       } };
       await service.collectPackageDownloads({ ecosystem: "npm", packageName: "agent-tool", from: "2026-01-04", to: "2026-01-06", connector });
       expect(service.inspectMultiLaneResearch(report.runId as never).details.filter((detail: any) => detail.ref.kind === "observation_series").every((detail: any) => detail.series && detail.observations.every(Boolean))).toBe(true);
@@ -139,6 +139,99 @@ describe("multi-lane demand research", () => {
       const run = (await service.getState()).runs.find((item) => item.run.id === report.runId)?.run;
       expect(run).toMatchObject({ status: "failed", errorMessage: "transient intelligence failure" });
       expect(service.listResearchSourceStatuses(report.runId as never).some((status) => status.source === "github" && status.status === "success")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists an inspectable partial multi-lane report when one qualitative source fails, another is zero-results, and a quantitative lane succeeds", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-multi-lane-partial-mix-"));
+    try {
+      const service = new WorkspaceService({
+        paths: resolveWorkspacePaths(root),
+        runner: {
+          async run(brief, request) {
+            const now = new Date().toISOString();
+            return {
+              execution: request.execution,
+              run: {
+                id: request.runId,
+                huntingTaskId: request.taskId,
+                status: "partial",
+                startedAt: now,
+                completedAt: now,
+                configHash: `cfg_${brief.slug}`,
+                errorMessage: "hn: unavailable",
+              },
+              documents: [],
+              chunks: [],
+              signals: [],
+              evidence: [],
+              drafts: [],
+              opportunities: [],
+              admissionResults: [],
+              sourceStatuses: [
+                {
+                  id: "search:0:hn",
+                  requestKey: "search:0:hn",
+                  source: "hn",
+                  status: "unavailable",
+                  itemCount: 0,
+                  reasonCode: "unavailable",
+                  reason: "HTTP 503",
+                  startedAt: now,
+                  completedAt: now,
+                  retryAt: null,
+                },
+                {
+                  id: "search:1:stack_exchange",
+                  requestKey: "search:1:stack_exchange",
+                  source: "stack_exchange",
+                  status: "success",
+                  itemCount: 0,
+                  reasonCode: "zero_results",
+                  reason: null,
+                  startedAt: now,
+                  completedAt: now,
+                  retryAt: null,
+                },
+              ],
+              config: { id: request.runId, effectiveConfig: { fixture: true }, execution: request.execution },
+            };
+          },
+        },
+      });
+      await service.createBrief({
+        slug: "partial-mix",
+        title: "Partial mix",
+        description: "Mixed source outcomes",
+        queryPlan: {
+          harvestMode: "l0",
+          searches: [
+            { platform: "hn", terms: ["agent"] },
+            { platform: "stack_exchange", terms: ["agent"] },
+          ],
+          quantitative: {
+            googleTrends: [{ subject: "agent coding", geography: "US", from: "2026-01-01T00:00:00Z", to: "2026-01-10T00:00:00Z", granularity: "day" }],
+            github: [{ repository: "owner/repo" }],
+            packages: [{ ecosystem: "npm", package: "agent-tool", from: "2026-01-01", to: "2026-01-03" }],
+          },
+        },
+      });
+      const report = await service.runMultiLaneResearch("partial-mix", { fixtureSet: "representative" });
+      const run = (await service.getState()).runs.find((item) => item.run.id === report.runId)?.run;
+      expect(run?.status).toBe("partial");
+      expect(report.claims.some((claim) => claim.lane === "supply_competition" || claim.lane === "trend_momentum")).toBe(true);
+      const statuses = service.listResearchSourceStatuses(report.runId as never);
+      expect(statuses).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: "hn", status: "unavailable" }),
+        expect.objectContaining({ source: "stack_exchange", status: "success", reasonCode: "zero_results", itemCount: 0 }),
+        expect.objectContaining({ source: "github", status: "success" }),
+        expect.objectContaining({ source: "npm", status: "success" }),
+      ]));
+      const inspected = service.inspectMultiLaneResearch(report.runId as never);
+      expect(inspected.report.claims.length).toBeGreaterThan(0);
+      expect(inspected.report.summary.candidates.every((item) => item.admissionOutcome === "rejected")).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

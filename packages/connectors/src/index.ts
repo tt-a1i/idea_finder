@@ -10,6 +10,8 @@ export { chunkDocument } from "./lib/chunking.js";
 export * from "./lib/signal-detector.js";
 export { detectSignals } from "./lib/signal-detector.js";
 export * from "./lib/ids.js";
+export * from "./lib/github-token.js";
+export * from "./lib/package-downloads.js";
 export * from "./connectors/hn-algolia.js";
 export * from "./connectors/v2ex.js";
 export * from "./connectors/app-store-rss.js";

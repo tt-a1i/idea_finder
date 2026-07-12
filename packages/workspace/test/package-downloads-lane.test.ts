@@ -68,4 +68,78 @@ describe("npm and PyPI package adoption lane", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("retains partial PyPI history with an explicit coverage gap and excludes unfinished buckets from momentum", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-package-partial-coverage-"));
+    try {
+      const { resolveWorkspacePaths } = await import("../src/storage/workspace-store.js");
+      const { WorkspaceService } = await import("../src/workspace-service.js");
+      const service = new WorkspaceService({ paths: resolveWorkspacePaths(root) });
+      const connector = {
+        ecosystem: "pypi" as const,
+        async collect() {
+          const provenance = { provider: "pypistats" as const, interface: "pypistats_public_api" as const, sourceRef: "https://pypistats.test/partial", retrievedAt: "2026-07-12T12:00:00.000Z", caveat: "partial" };
+          return {
+            ecosystem: "pypi" as const,
+            package: "tool",
+            from: "2026-07-10",
+            to: "2026-07-12",
+            provenance,
+            buckets: [
+              { id: "a", ecosystem: "pypi" as const, package: "tool", subject: "pypi:tool", day: "2026-07-10", downloads: 100, provenance },
+              { id: "b", ecosystem: "pypi" as const, package: "tool", subject: "pypi:tool", day: "2026-07-11", downloads: 200, provenance },
+              { id: "c", ecosystem: "pypi" as const, package: "tool", subject: "pypi:tool", day: "2026-07-12", downloads: 0, provenance },
+            ],
+            missingDays: [] as string[],
+            coverageComplete: true,
+          };
+        },
+      };
+      const result = await service.collectPackageDownloads({
+        ecosystem: "pypi",
+        packageName: "tool",
+        from: "2026-07-10",
+        to: "2026-07-12",
+        connector,
+        now: () => new Date("2026-07-12T12:00:00.000Z"),
+      });
+      expect(result.observations).toHaveLength(3);
+      expect(result.observations.at(-1)?.bucket.partial).toBe(true);
+      expect(result.event?.kind).toBe("momentum_up");
+      expect(result.event?.kind).not.toBe("momentum_down");
+
+      const incomplete = await service.collectPackageDownloads({
+        ecosystem: "pypi",
+        packageName: "gap-tool",
+        from: "2026-07-01",
+        to: "2026-07-03",
+        connector: {
+          ecosystem: "pypi",
+          async collect() {
+            const provenance = { provider: "pypistats" as const, interface: "pypistats_public_api" as const, sourceRef: "https://pypistats.test/gap", retrievedAt: "2026-07-04T00:00:00.000Z", caveat: null };
+            return {
+              ecosystem: "pypi" as const,
+              package: "gap-tool",
+              from: "2026-07-01",
+              to: "2026-07-03",
+              provenance,
+              buckets: [
+                { id: "d1", ecosystem: "pypi" as const, package: "gap-tool", subject: "pypi:gap-tool", day: "2026-07-01", downloads: 10, provenance },
+                { id: "d3", ecosystem: "pypi" as const, package: "gap-tool", subject: "pypi:gap-tool", day: "2026-07-03", downloads: 30, provenance },
+              ],
+              missingDays: ["2026-07-02"],
+              coverageComplete: false,
+            };
+          },
+        },
+        now: () => new Date("2026-07-04T00:00:00.000Z"),
+      });
+      expect(incomplete.observations).toHaveLength(2);
+      expect(incomplete.coverageComplete).toBe(false);
+      expect(incomplete.missingDays).toEqual(["2026-07-02"]);
+      expect(service.listQuantitativeSourceStatuses().some((item) => item.packageName === "gap-tool" && item.status === "partial" && item.itemCount === 2)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

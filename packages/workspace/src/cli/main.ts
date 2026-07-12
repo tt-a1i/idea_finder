@@ -5,6 +5,7 @@ import { createAuthorizedHttpGoogleTrendsTransport, GoogleTrendsSourceError, Pac
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
+import type { ResearchSourceStatus } from "../types.js";
 import { WorkspaceService } from "../workspace-service.js";
 import { createFixtureResearchRunner, type FixtureSourceScenario } from "../ports/runner-impl.js";
 import {
@@ -443,7 +444,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
           const end = Date.parse(`${request.to}T00:00:00.000Z`);
           const days = Array.from({ length: Math.floor((end - start) / 86_400_000) + 1 }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
           const provenance = { provider: "fixture" as const, interface: "recorded_fixture" as const, sourceRef: `fixture://${ecosystem}-downloads`, retrievedAt: "2026-02-01T00:00:00.000Z", caveat: "Recorded deterministic fixture" };
-          return { ecosystem, package: request.package, from: request.from, to: request.to, provenance, buckets: days.map((day) => ({ id: `pkg_fixture_${ecosystem}_${day}`, ecosystem, package: request.package, subject: `${ecosystem}:${request.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })) };
+          return { ecosystem, package: request.package, from: request.from, to: request.to, provenance, buckets: days.map((day) => ({ id: `pkg_fixture_${ecosystem}_${day}`, ecosystem, package: request.package, subject: `${ecosystem}:${request.package}`, day, downloads: Number(day.slice(-2)) * 100, provenance })), missingDays: [], coverageComplete: true };
         },
       } : undefined;
       const service = svc(workspaceDir);
@@ -603,10 +604,53 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     const state = await service.getState();
     const { runId, inbox } = await service.getInboxSummary(briefRef);
     const opportunities = await service.listOpportunities(briefRef);
-    const markdown = renderMarkdownReport({ brief, opportunities, calibrationEvents: state.calibrationEvents.filter((event) => opportunities.some((item) => item.id === event.opportunityId)), evidenceById: state.evidenceById, inbox, runId });
+    let multiLaneReport = null as Awaited<ReturnType<typeof service.inspectMultiLaneResearch>>["report"] | null;
+    let sourceStatuses: ResearchSourceStatus[] = [];
+    let researchStatus: string | null = null;
+    let incompletenessReasons: string[] = [];
+    if (runId) {
+      const run = state.runs.find((item) => item.run.id === runId);
+      researchStatus = run?.run.status ?? null;
+      sourceStatuses = service.listResearchSourceStatuses(runId as never);
+      incompletenessReasons = sourceStatuses
+        .filter((status) => status.status !== "success")
+        .map((status) => `${status.source}: ${status.reason ?? status.reasonCode}`);
+      try {
+        multiLaneReport = service.inspectMultiLaneResearch(runId as never).report;
+      } catch {
+        multiLaneReport = null;
+      }
+    }
+    const markdown = renderMarkdownReport({
+      brief,
+      opportunities,
+      calibrationEvents: state.calibrationEvents.filter((event) => opportunities.some((item) => item.id === event.opportunityId)),
+      evidenceById: state.evidenceById,
+      inbox,
+      runId,
+      researchStatus,
+      multiLaneReport,
+      sourceStatuses,
+      incompletenessReasons,
+    });
     const outputPath = flag(rest, "--out");
     if (outputPath) await writeFile(path.resolve(outputPath), markdown, "utf8");
-    return { command: "export", data: { briefId: brief.id, outputPath: outputPath ? path.resolve(outputPath) : null, markdown }, human: outputPath ? `Wrote ${path.resolve(outputPath)}` : markdown };
+    return {
+      command: "export",
+      data: {
+        briefId: brief.id,
+        runId,
+        researchStatus,
+        outputPath: outputPath ? path.resolve(outputPath) : null,
+        markdown,
+        multiLaneReport: multiLaneReport ? { summary: multiLaneReport.summary, claimCount: multiLaneReport.claims.length, candidateCount: multiLaneReport.summary.candidates.length } : null,
+        sourceStatuses,
+        incompleteness: incompletenessReasons.length ? { incomplete: true, reasons: incompletenessReasons } : undefined,
+      },
+      human: outputPath ? `Wrote ${path.resolve(outputPath)}` : markdown,
+      incompleteness: incompletenessReasons.length ? incompletenessReasons : undefined,
+      exitCode: incompletenessReasons.length ? CLI_EXIT_CODES.partialResult : undefined,
+    };
   }
 
   if (cmd === "agent" && sub === "list") {

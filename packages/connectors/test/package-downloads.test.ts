@@ -38,9 +38,44 @@ describe("package download connectors", () => {
     const response = (status: number, body: unknown) => vi.fn(async () => new Response(JSON.stringify(body), { status })) as typeof fetch;
     await expect(createNpmDownloadsConnector({ fetchFn: response(404, {}), baseUrl: "https://npm.test", minIntervalMs: 0 }).collect({ package: "missing", ...window })).rejects.toMatchObject({ status: "missing_package" });
     await expect(createNpmDownloadsConnector({ fetchFn: response(200, { ...fixture("npm-downloads-range.json"), downloads: [] }), baseUrl: "https://npm.test", minIntervalMs: 0 }).collect({ package: "@scope/tool", ...window })).rejects.toMatchObject({ status: "unavailable_history" });
-    await expect(createNpmDownloadsConnector({ fetchFn: response(200, { ...fixture("npm-downloads-range.json"), downloads: fixture("npm-downloads-range.json").downloads.slice(1) }), baseUrl: "https://npm.test", minIntervalMs: 0 }).collect({ package: "@scope/tool", ...window })).rejects.toMatchObject({ status: "unavailable_history" });
+    const partial = await createNpmDownloadsConnector({
+      fetchFn: response(200, { ...fixture("npm-downloads-range.json"), downloads: fixture("npm-downloads-range.json").downloads.slice(1) }),
+      baseUrl: "https://npm.test",
+      minIntervalMs: 0,
+      now: () => new Date("2026-07-04T00:00:00Z"),
+    }).collect({ package: "@scope/tool", ...window });
+    expect(partial.coverageComplete).toBe(false);
+    expect(partial.missingDays).toEqual(["2026-07-01"]);
+    expect(partial.buckets.map((item) => item.downloads)).toEqual([12, 24]);
     await expect(createNpmDownloadsConnector({ fetchFn: response(200, fixture("npm-downloads-drift.json")), baseUrl: "https://npm.test", minIntervalMs: 0 }).collect({ package: "@scope/tool", ...window })).rejects.toMatchObject({ status: "response_drift" });
     await expect(createPyPiDownloadsConnector({ fetchFn: response(200, fixture("pypistats-drift.json")), baseUrl: "https://pypistats.test", minIntervalMs: 0 }).collect({ package: "some-package", ...window })).rejects.toMatchObject({ status: "response_drift" });
+  });
+
+  it("does not treat future npm zeros as comparable history and keeps true zeros for completed days", async () => {
+    const body = {
+      ...fixture("npm-downloads-range.json"),
+      start: "2026-07-01",
+      end: "2026-07-04",
+      downloads: [
+        { day: "2026-07-01", downloads: 10 },
+        { day: "2026-07-02", downloads: 0 },
+        { day: "2026-07-03", downloads: 20 },
+        { day: "2026-07-04", downloads: 0 },
+      ],
+    };
+    const result = await createNpmDownloadsConnector({
+      fetchFn: vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch,
+      baseUrl: "https://npm.test",
+      minIntervalMs: 0,
+      now: () => new Date("2026-07-03T12:00:00Z"),
+    }).collect({ package: "@scope/tool", from: "2026-07-01", to: "2026-07-04" });
+    expect(result.buckets.map((item) => ({ day: item.day, downloads: item.downloads }))).toEqual([
+      { day: "2026-07-01", downloads: 10 },
+      { day: "2026-07-02", downloads: 0 },
+      { day: "2026-07-03", downloads: 20 },
+    ]);
+    expect(result.missingDays).toEqual(["2026-07-04"]);
+    expect(result.coverageComplete).toBe(false);
   });
 
   it.each(["npm", "pypi"] as const)("locally trips the %s retry window without a second request", async (ecosystem) => {

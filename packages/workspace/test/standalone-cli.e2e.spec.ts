@@ -166,6 +166,10 @@ describe("installed standalone CLI", () => {
     const compareMonitorRunId = (monitorCompare.envelope.data as { run: { run: { id: string } } }).run.run.id;
     expect(compareMonitorRunId).not.toBe(baselineMonitorRunId);
     expect(monitorCompare.envelope).toMatchObject({ data: { baselineRunId: baselineMonitorRunId, comparison: { diff: { baselineRunId: baselineMonitorRunId, compareRunId: compareMonitorRunId, entries: expect.arrayContaining([expect.objectContaining({ evidenceChange: expect.objectContaining({ strongPainDelta: 1 }), causes: expect.any(Array), notificationReasons: expect.arrayContaining(["strong_pain_growth"]) })]), notifications: { triggered: true, reasons: expect.arrayContaining(["strong_pain_growth"]) } } } } });
+    // Export a completed research/monitor run before introducing intentional incompleteness.
+    const exportedComplete = await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(exportedComplete, "export");
+    expect((exportedComplete.envelope.data as { markdown: string }).markdown).not.toContain("No signals yet — run research first");
     const monitorPartial = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--fixture-source-outcome", "partial-zero", "--workspace", workspace, "--json"], consumer);
     expect(monitorPartial.code).toBe(CLI_EXIT_CODES.partialResult);
     expect(monitorPartial.envelope).toMatchObject({ status: "partial", data: { comparison: { diff: { coverage: { partial: true }, summary: { cooled: 0 }, entries: [expect.objectContaining({ coolingSuppressed: true, conclusive: false })] } } } });
@@ -202,7 +206,10 @@ describe("installed standalone CLI", () => {
     const packagedMissing = await invoke(executable, ["trends", "collect", "pypi", "missing-package", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--fixture-failure", "missing_package", "--workspace", workspace, "--json"], consumer);
     expect(packagedMissing.code).toBe(CLI_EXIT_CODES.missingResource);
     expect(packagedMissing.envelope).toMatchObject({ errors: [{ code: "package_downloads.missing_package" }], data: { sourceHealth: [expect.objectContaining({ ecosystem: "pypi", status: "missing_package" })] } });
-    expectSuccess(await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer), "export");
+    const exportedPartial = await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer);
+    expect(exportedPartial.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(exportedPartial.envelope).toMatchObject({ command: "export", status: "partial" });
+    expect((exportedPartial.envelope.data as { markdown: string }).markdown).not.toContain("No signals yet — run research first");
     expectSuccess(await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer), "agent list");
     const agent = await invoke(executable, ["agent", "create", "--kind", "research", "--intent", "inspect evidence", "--workspace", workspace, "--json"], consumer);
     expectSuccess(agent, "agent create");
@@ -229,7 +236,7 @@ describe("installed standalone CLI", () => {
       expect(count, table).toBeGreaterThan(0);
     }
     canonicalDb.close();
-  });
+  }, 20_000);
 
   it("migrates legacy decision JSON through the installed CLI and restarts without it", async () => {
     const legacyWorkspace = path.join(consumer, "legacy-decision-workspace");
@@ -368,6 +375,23 @@ describe("installed standalone CLI", () => {
     const recoveredInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
     expect(recoveredInspect.code).toBe(0);
     expect((recoveredInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id)).toEqual(expect.arrayContaining(retainedClaimIds));
+
+    const exported = await invoke(executable, ["export", "multi", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(exported.code).toBe(0);
+    const markdown = (exported.envelope.data as { markdown: string }).markdown;
+    expect(markdown).not.toContain("No signals yet — run research first");
+    expect(markdown).toContain("Multi-lane research");
+    expect(markdown).toContain("Candidate admission outcomes");
+    expect(markdown).toMatch(/trend_only|download_only|star_only/);
+    expect(markdown).toContain("unvalidated demand");
+
+    const partialAgain = await invoke(executable, ["research", "run", "multi", "--fixture-set", "google-throttled", "--workspace", multiWorkspace, "--json"], consumer);
+    const partialExport = await invoke(executable, ["export", "multi", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(partialExport.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect((partialExport.envelope.data as { markdown: string }).markdown).toContain("Incompleteness");
+    expect((partialExport.envelope.data as { multiLaneReport: { claimCount: number } | null }).multiLaneReport?.claimCount).toBeGreaterThan(0);
+    expect(partialAgain.code).toBe(CLI_EXIT_CODES.partialResult);
+
     expect((await invoke(executable, ["monitor", "schedule", "multi", "--cadence", "daily", "--workspace", multiWorkspace, "--json"], consumer)).code).toBe(0);
     const quantitativeMonitor = await invoke(executable, ["monitor", "run", "multi", "--fixture", "--workspace", multiWorkspace, "--json"], consumer);
     expect(quantitativeMonitor.code, JSON.stringify(quantitativeMonitor.envelope)).toBe(0);

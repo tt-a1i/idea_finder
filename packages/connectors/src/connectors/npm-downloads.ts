@@ -1,6 +1,6 @@
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher } from "../lib/fetch.js";
-import { collected, parseBuckets, validateWindow } from "../lib/package-downloads.js";
+import { collected, isFutureUtcDay, parseBuckets, validateWindow } from "../lib/package-downloads.js";
 import { PackageDownloadsSourceError, type PackageDownloadsConnector } from "../ports/package-downloads-connector.js";
 
 export interface NpmDownloadsConnectorOptions extends FetchOptions { readonly baseUrl?: string; readonly now?: () => Date; }
@@ -37,9 +37,23 @@ export function createNpmDownloadsConnector(options: NpmDownloadsConnectorOption
       if (typeof body.package !== "string" || packageName(body.package) !== name || body.start !== from || body.end !== to) {
         throw new PackageDownloadsSourceError("response_drift", "npm downloads response identity/window mismatch");
       }
-      const rows = parseBuckets(body.downloads, from, to, "npm");
-      const provenance = { provider: "npm" as const, interface: "npm_downloads_public_api" as const, sourceRef: url.toString(), retrievedAt: now().toISOString(), caveat: null };
-      return { ecosystem: "npm", package: name, from, to, buckets: collected("npm", name, rows, provenance), provenance };
+      const parsed = parseBuckets(body.downloads, from, to, "npm");
+      // Future calendar days are never comparable observations; drop them instead of treating provider zeros as real.
+      const usable = parsed.rows.filter((row) => !isFutureUtcDay(row.day, now()));
+      const droppedFuture = parsed.rows.filter((row) => isFutureUtcDay(row.day, now())).map((row) => row.day);
+      const missingDays = [...new Set([...parsed.missingDays, ...droppedFuture])].sort();
+      if (usable.length === 0) throw new PackageDownloadsSourceError("unavailable_history", "npm returned no comparable history for the requested window");
+      const provenance = { provider: "npm" as const, interface: "npm_downloads_public_api" as const, sourceRef: url.toString(), retrievedAt: now().toISOString(), caveat: missingDays.length ? `Incomplete coverage; missing days: ${missingDays.join(", ")}` : null };
+      return {
+        ecosystem: "npm",
+        package: name,
+        from,
+        to,
+        buckets: collected("npm", name, usable, provenance),
+        provenance,
+        missingDays,
+        coverageComplete: missingDays.length === 0,
+      };
     },
   };
 }

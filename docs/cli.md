@@ -151,12 +151,17 @@ idea-finder trends series --subject owner/repository --metric stars --json
 idea-finder trends events --subject owner/repository --metric stars --json
 ```
 
-It uses the authorized public GitHub REST API (anonymous for public repositories,
-or `GITHUB_TOKEN` when set) and records raw/normalized values plus request
-provenance and source health in SQLite. Repository stars, forks, contributors,
-issue activity, and open-issue counts are classified only as developer-adoption
-or supply evidence. They are not `RawSignal`/`EvidenceItem` records and cannot by
-themselves satisfy Library admission or promotion.
+It uses the authorized public GitHub REST API and records raw/normalized values
+plus request provenance and source health in SQLite. Credential resolution order
+is: explicit connector option, `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`
+when the GitHub CLI is available. Anonymous mode remains when no credential is
+found. Tokens never appear in command arguments, logs, JSON envelopes, SQLite
+payloads, errors, or export reports. Rate-limit exhaustion is recorded as
+`throttled` with retry/reset guidance — never as an empty success. Repository
+stars, forks, contributors, issue activity, and open-issue counts are classified
+only as developer-adoption or supply evidence. They are not
+`RawSignal`/`EvidenceItem` records and cannot by themselves satisfy Library
+admission or promotion.
 
 Google Trends search momentum requires an explicit subject, geography, and time
 window. Google's official API is currently limited-access, so production
@@ -229,9 +234,13 @@ idea-finder brief create agent-demand --title "Agent demand" \
   --google-subject "agent coding" --google-geo US \
   --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool \
   --from 2026-01-01 --to 2026-01-10 --json
+# Live research (default). Do not pass --fixture / --fixture-set for real studies.
+idea-finder research run agent-demand --json
+idea-finder research inspect <runId> --json
+idea-finder export agent-demand --json
+# Deterministic demos/tests only:
 idea-finder research run agent-demand --fixture-set representative --json
 idea-finder research run agent-demand --retry run_123 --json
-idea-finder research inspect <runId> --json
 idea-finder research follow-up <runId> --proposal <id> --create agent-demand-followup --json
 ```
 
@@ -239,13 +248,22 @@ The summary has schema version `1` and no aggregate score. Every claim resolves
 to stored quote, observation-series, ranking, or source-URL references. Exact
 duplicate text is grouped before corroboration gates are evaluated.
 Trend/star/ranking/download-only candidates remain visibly `unvalidated`;
-trend anomalies only propose follow-up research and never create an Opportunity.
-Qualitative and quantitative requests share one run-scoped source-outcome
-ledger. If Google Trends, GitHub, npm, or PyPI is unavailable, `research run`
-still persists a partial report containing every completed lane; both `run` and
-`inspect` return exit 6 and name incomplete lanes. Retrying the same run skips
-successful requests, collects missing lanes, and updates the report without
-duplicating persisted snapshots.
+`research inspect` and `export` show their rejection reasons. Formal Library
+admission rejects stay on `library rejected --run <runId>` and are a separate
+list — multi-lane unvalidated candidates never silently enter the Opportunity
+Library. Trend anomalies only propose follow-up research and never create an
+Opportunity. Qualitative and quantitative requests share one run-scoped
+source-outcome ledger. If Google Trends, GitHub, npm, or PyPI is unavailable,
+`research run` still persists a partial report containing every completed lane;
+both `run` and `inspect` return exit 6 and name incomplete lanes. `export`
+consumes the latest multi-lane report (claims, lanes, source statuses,
+incompleteness, candidate outcomes) and never claims “run research first” after
+a completed or partial research run. Retrying the same run skips successful
+requests, collects missing lanes, and updates the report without duplicating
+persisted snapshots. Zero-result sources remain `success` with
+`reasonCode: zero_results` and are not treated as qualitative corroboration.
+Incomplete npm/PyPI windows retain collected observations, mark coverage gaps,
+and exclude unfinished/future/partial buckets from momentum.
 
 Monitoring does not run an internal scheduler. `monitor schedule` stores
 `manual`, `daily`, or `weekly` policy and evidence thresholds in canonical

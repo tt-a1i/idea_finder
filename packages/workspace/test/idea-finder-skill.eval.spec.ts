@@ -21,9 +21,18 @@ describe("idea-finder companion Skill evaluations", () => {
     ]);
     expect(trace.commands.every((command) => command.exitCode === 0)).toBe(true);
     expect(trace.commands.every((command) => command.envelope.contractVersion === "1.0")).toBe(true);
+    expect(JSON.stringify(trace.commands)).not.toMatch(/--fixture(?:-set)?/);
     expect(trace.response).toContain("Stored evidence:");
     expect(trace.response).toContain("Inference:");
     expect(trace.pausedForHumanDecision).toBe(false);
+  });
+
+  it("refuses fixture flags when the user asks for real live research", async () => {
+    const skill = await readFile(path.join(skillRoot, "SKILL.md"), "utf8");
+    expect(skill).toMatch(/Never pass `--fixture` or `--fixture-set` when the user asks for real\/live research/);
+    expect(skill).toContain("Never invent or paste fixture data");
+    const workflows = await readFile(path.join(skillRoot, "references", "cli-workflows.md"), "utf8");
+    expect(workflows).toContain("never add --fixture / --fixture-set for real studies");
   });
 
   it("loads the human-decision boundary and pauses validation before mutation", async () => {

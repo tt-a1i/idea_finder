@@ -38,6 +38,40 @@ afterEach(() => {
 });
 
 describe("L0 connectors (fixture-backed)", () => {
+  it("preserves the /api/v1 path when composing HN search URLs and encodes query params", async () => {
+    const seen: string[] = [];
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response(JSON.stringify(loadFixture("hn-search.json")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const connector = createHnAlgoliaConnector({
+      fetchFn,
+      baseUrl: "https://hn.algolia.com/api/v1",
+      minIntervalMs: 0,
+    });
+    const docs = [];
+    for await (const doc of connector.search({
+      platform: "hn",
+      terms: ["agent coding", "context loss"],
+      huntingTaskId: taskId,
+      limit: 5,
+      since: "2026-01-01T00:00:00.000Z",
+    })) {
+      docs.push(doc);
+    }
+    expect(docs).toHaveLength(1);
+    expect(seen[0]).toMatch(/^https:\/\/hn\.algolia\.com\/api\/v1\/search\?/);
+    const url = new URL(seen[0]!);
+    expect(url.pathname).toBe("/api/v1/search");
+    expect(url.searchParams.get("query")).toBe("agent coding context loss");
+    expect(url.searchParams.get("tags")).toBe("story");
+    expect(url.searchParams.get("hitsPerPage")).toBe("5");
+    expect(url.searchParams.get("numericFilters")).toBe(`created_at_i>${Math.floor(Date.parse("2026-01-01T00:00:00.000Z") / 1000)}`);
+  });
+
   it("normalizes HN Algolia hits to RawDocument with L0 provenance", async () => {
     const connector = createHnAlgoliaConnector({
       fetchFn: mockFetch({ "/search": loadFixture("hn-search.json") }),

@@ -95,4 +95,45 @@ describe("GitHub quantitative evidence lane", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("reuses GITHUB_TOKEN for Authorization without leaking it into CLI output, errors, or SQLite", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-github-token-leak-"));
+    const secret = "ghs_cli_secret_token_must_never_appear";
+    const previous = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = secret;
+    try {
+      const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        expect(headers.get("authorization")).toBe(`Bearer ${secret}`);
+        const url = String(input);
+        if (url.includes("/contributors")) return new Response(JSON.stringify([{ id: 1, contributions: 2 }]), { status: 200 });
+        if (url.includes("/issues")) return new Response(JSON.stringify([{ id: 2, created_at: "2026-07-10T00:00:00Z", closed_at: null }]), { status: 200 });
+        return new Response(JSON.stringify({ full_name: "owner/repo", stargazers_count: 10, forks_count: 2, open_issues_count: 1 }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchFn);
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      expect(await runCli(["trends", "collect", "github", "owner/repo", "--workspace", root, "--json"], {
+        stdout: (line) => stdout.push(line),
+        stderr: (line) => stderr.push(line),
+      })).toBe(0);
+      const blob = [...stdout, ...stderr].join("\n");
+      expect(blob).not.toContain(secret);
+      expect(JSON.stringify(JSON.parse(stdout[0]!))).not.toContain(secret);
+
+      const exportOut: string[] = [];
+      await runCli(["brief", "create", "gh-leak", "--title", "gh leak", "--github-repo", "owner/repo", "--workspace", root, "--json"], { stdout: () => undefined });
+      await runCli(["research", "run", "gh-leak", "--fixture-set", "representative", "--workspace", root, "--json"], { stdout: () => undefined });
+      await runCli(["export", "gh-leak", "--workspace", root, "--json"], { stdout: (line) => exportOut.push(line) });
+      expect(exportOut.join("\n")).not.toContain(secret);
+
+      const { readFile } = await import("node:fs/promises");
+      const db = await readFile(path.join(root, "pipeline", "idea_finder.db"));
+      expect(db.includes(secret)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -181,8 +181,14 @@ export function detectLatestPackageDownloadEvent(
   if (!Number.isFinite(threshold) || threshold < 0) {
     throw new InvariantViolation("package.threshold_invalid", "stableRelativeThreshold must be non-negative");
   }
-  const previous = observationsById.get(series.observationIds.at(-2)!);
-  const current = observationsById.get(series.observationIds.at(-1)!);
+  // Exclude incomplete / future / partial buckets from momentum; missing data must never look like a real drop.
+  const comparableIds = series.observationIds.filter((id) => {
+    const observation = observationsById.get(id);
+    return observation !== undefined && !observation.bucket.partial;
+  });
+  if (comparableIds.length < 2) return null;
+  const previous = observationsById.get(comparableIds.at(-2)!);
+  const current = observationsById.get(comparableIds.at(-1)!);
   if (!previous || !current) throw new InvariantViolation("trend.missing_observation", "Package event requires series observations");
   const delta = current.normalizedValue - previous.normalizedValue;
   const relativeDelta = previous.normalizedValue === 0 ? null : delta / previous.normalizedValue;

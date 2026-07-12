@@ -17,12 +17,14 @@ Read [references/cli-workflows.md](references/cli-workflows.md) for installation
 4. Treat exit code 6 and envelope status `partial` as retained-but-incomplete research, not as total failure.
 5. Inspect stored evidence before making a claim. Cite the stored quote, series/observation, ranking reference, or source URL returned by inspect commands.
 6. Keep conclusions conditional whenever coverage or evidence is incomplete.
+7. Default to live research. Never pass `--fixture` or `--fixture-set` when the user asks for real/live research. Fixtures are only for demos and deterministic tests.
+8. Never invent or paste fixture data to fill gaps left by failed, throttled, unauthorized, or zero-result sources.
 
 ## Choose sources by claim
 
 - Use HN, V2EX, App Store reviews, Stack Exchange, or explicit user imports for qualitative demand, pain, workarounds, commercial intent, and contradictory evidence.
-- Use Google Trends only for search momentum.
-- Use GitHub metrics only for developer adoption and supply/competition.
+- Use Google Trends only for search momentum (`IDEA_FINDER_GOOGLE_TRENDS_ENDPOINT`; fail-closed `authorization_required` without it).
+- Use GitHub metrics only for developer adoption and supply/competition. Prefer `GITHUB_TOKEN` / `GH_TOKEN` / authenticated `gh`; anonymous mode may throttle.
 - Use npm or PyPI downloads only for package adoption; retain the PyPI third-party-data caveat.
 - Require explicit authorization for login-gated or restricted sources. Otherwise request a user-provided import. Never bypass login, access controls, robots policy, or source terms.
 - Do not treat trend, rank, stars, forks, or downloads alone as validated demand.
@@ -31,15 +33,15 @@ Read [references/cli-workflows.md](references/cli-workflows.md) for installation
 
 ### Discover or focus research
 
-Create a Brief when the user has no matching Brief or changes the subject, persona, geography, time window, repository, package, evidence lens, or source plan. Select only sources relevant to the claim. Use `research run` followed by `research inspect` for both qualitative-only and multi-lane research so every summarized claim has stored quote/document/source provenance. Use inbox and Library commands only as additional admission views.
+Create a Brief when the user has no matching Brief or changes the subject, persona, geography, time window, repository, package, evidence lens, or source plan. Select only sources relevant to the claim. Use `research run` followed by `research inspect` for both qualitative-only and multi-lane research so every summarized claim has stored quote/document/source provenance. Use `export` to render the multi-lane report. Use inbox and Library commands only as additional admission views.
 
 ### Inspect evidence
 
-Use `research inspect` for multi-lane claims and provenance. Use `library inspect <opportunityId> --run <runId>` for an admitted Opportunity and `library rejected --run <runId>` for failed admission. Report contradictory evidence beside supporting evidence.
+Use `research inspect` for multi-lane claims, provenance, and rejected multi-lane candidates (`summary.candidates`). Use `library inspect <opportunityId> --run <runId>` for an admitted Opportunity and `library rejected --run <runId>` for formal Library admission failures only. Report contradictory evidence beside supporting evidence.
 
 ### Handle incomplete work
 
-Name every incomplete source or lane and its structured reason. Preserve and cite successful evidence. Label all conclusions conditional. Retry the same ResearchRun ID when the user asks to recover missing sources; do not create a healthy-looking replacement run.
+Name every incomplete source or lane and its structured reason (`failed`, `throttled`, `unauthorized`/`authorization_required`, `zero_results`, coverage gaps). Preserve and cite successful evidence. Label all conclusions conditional. Retry the same ResearchRun ID when the user asks to recover missing sources; do not create a healthy-looking replacement run. Do not retry unauthorized sources until credentials or an import are provided.
 
 ### Calibrate and validate
 

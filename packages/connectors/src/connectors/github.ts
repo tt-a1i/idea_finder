@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher } from "../lib/fetch.js";
+import { resolveGithubToken, type GithubTokenResolver } from "../lib/github-token.js";
 import type {
   CollectedMetricObservation,
   QuantitativeCollectionRequest,
@@ -13,6 +14,8 @@ const API_VERSION = "2022-11-28";
 export interface GitHubQuantitativeConnectorOptions extends FetchOptions {
   readonly baseUrl?: string;
   readonly token?: string;
+  /** Override env/`gh auth token` resolution (tests). */
+  readonly tokenResolver?: GithubTokenResolver;
   readonly now?: () => Date;
 }
 
@@ -134,7 +137,10 @@ export function createGitHubQuantitativeConnector(options: GitHubQuantitativeCon
   const apiRoot = new URL(options.baseUrl ?? "https://api.github.com");
   if (apiRoot.protocol !== "https:") throw new Error("GitHub API baseUrl must use HTTPS");
   const fetcher = createRateLimitedFetcher(options);
-  const token = options.token ?? process.env.GITHUB_TOKEN;
+  const token = resolveGithubToken(
+    Object.prototype.hasOwnProperty.call(options, "token") ? options.token : undefined,
+    options.tokenResolver,
+  );
   const now = options.now ?? (() => new Date());
   const headers = (): Headers => {
     const value = new Headers({ Accept: "application/vnd.github+json", "X-GitHub-Api-Version": API_VERSION });

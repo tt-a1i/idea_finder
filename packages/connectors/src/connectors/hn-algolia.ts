@@ -24,6 +24,12 @@ interface HnSearchResponse {
   readonly hits: readonly HnHit[];
 }
 
+function hnApiUrl(baseUrl: string, path: string): URL {
+  const root = baseUrl.replace(/\/$/, "");
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return new URL(`${root}${suffix}`);
+}
+
 export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}): SourceConnector {
   const baseUrl = options.baseUrl ?? "https://hn.algolia.com/api/v1";
   const fetcher = createRateLimitedFetcher(options);
@@ -33,7 +39,7 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
 
     async healthcheck(): Promise<ConnectorHealth> {
       try {
-        const url = new URL("/search", baseUrl);
+        const url = hnApiUrl(baseUrl, "/search");
         url.searchParams.set("query", "test");
         url.searchParams.set("tags", "story");
         url.searchParams.set("hitsPerPage", "1");
@@ -47,7 +53,7 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
     async *search(query: SourceSearchQuery): AsyncIterable<RawDocument> {
       const limit = query.limit ?? 20;
       const searchTerm = query.terms.join(" ");
-      const url = new URL("/search", baseUrl);
+      const url = hnApiUrl(baseUrl, "/search");
       url.searchParams.set("query", searchTerm);
       url.searchParams.set("tags", "story");
       url.searchParams.set("hitsPerPage", String(limit));
@@ -65,7 +71,7 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
     },
 
     async fetch(externalId: string): Promise<RawDocument> {
-      const url = new URL(`/items/${externalId}`, baseUrl);
+      const url = hnApiUrl(baseUrl, `/items/${externalId}`);
       const hit = await fetchJson<HnHit>(fetcher, url);
       return hitToDocument(hit, {
         platform: "hn",

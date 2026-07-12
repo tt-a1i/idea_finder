@@ -1,6 +1,6 @@
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher } from "../lib/fetch.js";
-import { collected, parseBuckets, validDay, validateWindow } from "../lib/package-downloads.js";
+import { collected, isFutureUtcDay, parseBuckets, validDay, validateWindow } from "../lib/package-downloads.js";
 import { PackageDownloadsSourceError, type PackageDownloadsConnector } from "../ports/package-downloads-connector.js";
 
 export interface PyPiDownloadsConnectorOptions extends FetchOptions { readonly baseUrl?: string; readonly now?: () => Date; }
@@ -45,9 +45,30 @@ export function createPyPiDownloadsConnector(options: PyPiDownloadsConnectorOpti
         || typeof item.downloads !== "number" || !Number.isSafeInteger(item.downloads) || item.downloads < 0)) {
         throw new PackageDownloadsSourceError("response_drift", "pypistats daily bucket drift");
       }
-      const rows = parseBuckets(mapped.filter((item) => (item.day as string) >= from && (item.day as string) <= to), from, to, "pypistats");
-      const provenance = { provider: "pypistats" as const, interface: "pypistats_public_api" as const, sourceRef: url.toString(), retrievedAt: now().toISOString(), caveat: "Third-party statistics derived from the public PyPI download dataset; not an official PyPI statistics API." };
-      return { ecosystem: "pypi", package: name, from, to, buckets: collected("pypi", name, rows, provenance), provenance };
+      const parsed = parseBuckets(mapped.filter((item) => (item.day as string) >= from && (item.day as string) <= to), from, to, "pypistats");
+      const usable = parsed.rows.filter((row) => !isFutureUtcDay(row.day, now()));
+      const droppedFuture = parsed.rows.filter((row) => isFutureUtcDay(row.day, now())).map((row) => row.day);
+      const missingDays = [...new Set([...parsed.missingDays, ...droppedFuture])].sort();
+      if (usable.length === 0) throw new PackageDownloadsSourceError("unavailable_history", "pypistats returned no comparable history for the requested window");
+      const provenance = {
+        provider: "pypistats" as const,
+        interface: "pypistats_public_api" as const,
+        sourceRef: url.toString(),
+        retrievedAt: now().toISOString(),
+        caveat: missingDays.length
+          ? `Third-party statistics derived from the public PyPI download dataset; not an official PyPI statistics API. Incomplete coverage; missing days: ${missingDays.join(", ")}`
+          : "Third-party statistics derived from the public PyPI download dataset; not an official PyPI statistics API.",
+      };
+      return {
+        ecosystem: "pypi",
+        package: name,
+        from,
+        to,
+        buckets: collected("pypi", name, usable, provenance),
+        provenance,
+        missingDays,
+        coverageComplete: missingDays.length === 0,
+      };
     },
   };
 }

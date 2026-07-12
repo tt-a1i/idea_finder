@@ -6,14 +6,14 @@
       "prompt": "帮我发现 agent coding 工作流里真实、反复出现的需求。",
       "expectedCommands": ["workspace diagnostics", "brief create", "research run", "research inspect"],
       "requiredResponseLabels": ["Stored evidence", "Inference", "Contradictory evidence", "Unresolved uncertainty"],
-      "forbiddenCommands": ["board calibrate", "validation complete"]
+      "forbiddenCommands": ["board calibrate", "validation complete", "--fixture", "--fixture-set"]
     },
     {
       "id": "focused-research",
       "prompt": "研究美国 agent coding 搜索趋势、owner/repo 和 npm/PyPI agent-tool，时间窗 2026-01-01 到 2026-01-10。",
       "expectedCommands": ["brief create", "research run", "research inspect"],
       "requiredResponseLabels": ["Stored evidence", "Trend-only lead", "Inference", "Unresolved uncertainty"],
-      "forbiddenCommands": ["board calibrate"]
+      "forbiddenCommands": ["board calibrate", "--fixture", "--fixture-set"]
     },
     {
       "id": "evidence-inspection",

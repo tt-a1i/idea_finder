@@ -202,4 +202,30 @@ describe("GitHub quantitative connector", () => {
     await expect(connector.collect({ subject: "octocat/Hello-World" }))
       .rejects.toThrow("repository.stargazers_count must be a non-negative number");
   });
+
+  it("reuses GH_TOKEN / resolver credentials without leaking the token into errors", async () => {
+    const secret = "ghs_test_secret_token_never_log";
+    const fetchFn = fixtureFetch();
+    const connector = createGitHubQuantitativeConnector({
+      fetchFn,
+      baseUrl: "https://api.github.test",
+      tokenResolver: () => secret,
+      minIntervalMs: 0,
+      now: () => new Date("2026-07-11T00:00:00.000Z"),
+    });
+    await connector.collect({ subject: "octocat/Hello-World" });
+    const headers = new Headers((fetchFn as ReturnType<typeof vi.fn>).mock.calls[0]![1]?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${secret}`);
+
+    const denied = vi.fn(async () => new Response("denied", { status: 401 })) as typeof fetch;
+    const failing = createGitHubQuantitativeConnector({
+      fetchFn: denied, baseUrl: "https://api.github.test", token: secret, minIntervalMs: 0,
+    });
+    await expect(failing.collect({ subject: "octocat/Hello-World" })).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).not.toContain(secret);
+      expect(JSON.stringify(error)).not.toContain(secret);
+      return true;
+    });
+  });
 });

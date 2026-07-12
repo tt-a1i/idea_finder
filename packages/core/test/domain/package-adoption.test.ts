@@ -121,6 +121,36 @@ describe("package adoption domain", () => {
     expect(() => buildPackageDownloadSeries(asId("gap"), [first, gap])).toThrow("contiguous");
   });
 
+  it("ignores partial/incomplete buckets when detecting momentum and never invents a drop from them", () => {
+    const complete = createPackageDownloadObservation({
+      id: asId("complete"), ecosystem: "npm", packageName: "tool", downloads: 1000, provenance,
+      bucket: { startAt: "2026-07-10T00:00:00.000Z", endAt: "2026-07-11T00:00:00.000Z", resolution: "day", timezone: "UTC", coverageDays: 1, partial: false },
+    });
+    const incompleteZero = createPackageDownloadObservation({
+      id: asId("incomplete"), ecosystem: "npm", packageName: "tool", downloads: 0, provenance,
+      bucket: { startAt: "2026-07-11T00:00:00.000Z", endAt: "2026-07-12T00:00:00.000Z", resolution: "day", timezone: "UTC", coverageDays: 1, partial: true },
+    });
+    const prior = createPackageDownloadObservation({
+      id: asId("prior"), ecosystem: "npm", packageName: "tool", downloads: 800, provenance,
+      bucket: { startAt: "2026-07-09T00:00:00.000Z", endAt: "2026-07-10T00:00:00.000Z", resolution: "day", timezone: "UTC", coverageDays: 1, partial: false },
+    });
+    const built = buildPackageDownloadSeries(asId("pseries_partial"), [prior, complete, incompleteZero]);
+    const event = detectLatestPackageDownloadEvent(
+      built.series,
+      new Map(built.observations.map((item) => [item.id, item])),
+      { detectedAt: "2026-07-11T12:00:00.000Z" },
+    );
+    expect(event).toMatchObject({ kind: "momentum_up", previousObservationId: prior.id, currentObservationId: complete.id });
+    expect(event?.kind).not.toBe("momentum_down");
+
+    const onlyPartial = buildPackageDownloadSeries(asId("pseries_only_partial"), [complete, incompleteZero]);
+    expect(detectLatestPackageDownloadEvent(
+      onlyPartial.series,
+      new Map(onlyPartial.observations.map((item) => [item.id, item])),
+      { detectedAt: "2026-07-11T12:00:00.000Z" },
+    )).toBeNull();
+  });
+
   it("does not let npm and PyPI popularity satisfy admission or promotion", () => {
     const packageMomentum = [
       observation("npm", "requests", 0, 7_000_000),

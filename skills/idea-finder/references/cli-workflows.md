@@ -34,10 +34,17 @@ Create a focused multi-lane Brief and run it:
 
 ```bash
 idea-finder brief create agent-demand --title "Agent demand" --manual-import "This workaround is painful" --google-subject "agent coding" --google-geo US --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool --from 2026-01-01 --to 2026-01-10 --json
+# Live research — never add --fixture / --fixture-set for real studies.
 idea-finder research run agent-demand --json
 idea-finder research inspect <runId> --json
 idea-finder research inspect <runId> --claim <claimId> --json
+idea-finder export agent-demand --json
 ```
+
+GitHub quantitative collection reuses `GITHUB_TOKEN`, then `GH_TOKEN`, then
+`gh auth token` when available. Prefer setting `GITHUB_TOKEN` in the agent
+environment. Tokens must never appear in argv, logs, or reports. Anonymous
+access may return `throttled`.
 
 Google Trends production collection requires an explicitly authorized adapter
 because Google's official API is limited-access. Configure an approved API or
@@ -64,17 +71,21 @@ idea-finder library --brief agent-workflows --json
 idea-finder library rejected --run <runId> --json
 ```
 
+`library rejected` lists formal Library admission failures. Multi-lane
+trend/star/ranking/download-only rejects live on `research inspect` /
+`export` under `summary.candidates` and must not be treated as Library entries.
+
 Run each CLI command as its own invocation. Do not chain exploratory `ls` or path probes with `&&` before the first `workspace diagnostics` call; create the workspace by passing `--workspace <dir>` to the CLI.
 ## Incomplete research and retry
 
-Read `data.sourceStatuses`, `incompleteness.reasons`, and retained claims when status is `partial`. Retry the same run:
+Read `data.sourceStatuses`, `incompleteness.reasons`, and retained claims when status is `partial` (exit 6). Successful lanes remain inspectable. Retry the same run:
 
 ```bash
 idea-finder research run agent-demand --retry <runId> --json
 idea-finder research inspect <runId> --json
 ```
 
-Do not retry an unauthorized source until the user supplies authorization or an import.
+Do not retry an unauthorized source until the user supplies authorization or an import. Do not use `--fixture` / `--fixture-set` to paper over live failures.
 
 ## Opportunity and validation boundary
 
