@@ -19,6 +19,7 @@ export interface MarkdownReportInput {
   readonly multiLaneReport?: StoredMultiLaneReportRecord | null;
   readonly sourceStatuses?: readonly ResearchSourceStatus[];
   readonly incompletenessReasons?: readonly string[];
+  readonly painMapMarkdown?: string | null;
 }
 
 function formatScore(score: Opportunity["scoreVector"]): string {
@@ -61,6 +62,10 @@ export function renderMarkdownReport(input: MarkdownReportInput): string {
     `- **Success criteria:** ${input.brief.successCriteria}`,
     "",
   ];
+
+  if (input.painMapMarkdown) {
+    lines.push(input.painMapMarkdown, "");
+  }
 
   if (report) {
     lines.push("## Multi-lane research", "");

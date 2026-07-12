@@ -6,6 +6,8 @@ import { createAuthorizedHttpGoogleTrendsTransport, GoogleTrendsSourceError, Pac
 import type { CalibrationAction, GitHubMetric, ValidationExperimentType, ValidationOutcome } from "@idea-finder/core";
 import { InvariantViolation } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
+import { buildPainMapReport, renderPainMapMarkdown } from "../report/pain-map.js";
+import { clusterPainSignals } from "../orchestration/research-rounds.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
 import type { ResearchSourceStatus } from "../types.js";
 import { WorkspaceService } from "../workspace-service.js";
@@ -781,6 +783,38 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
         multiLaneReport = null;
       }
     }
+    let painMapMarkdown: string | null = null;
+    let painMap = null as ReturnType<typeof buildPainMapReport> | null;
+    if (brief.searchPlanId && runId) {
+      const plan = await service.getSearchPlan(brief.searchPlanId);
+      const run = state.runs.find((item) => item.run.id === runId);
+      if (plan && run) {
+        const independenceRecords = (service.inspectMultiLaneResearch(runId as never).independence ?? []) as Array<{ documentId: string; independenceGroupId: string }>;
+        const independence = new Map(independenceRecords.map((item) => [item.documentId, item.independenceGroupId]));
+        const clusters = clusterPainSignals({
+          signals: run.signals,
+          independenceGroupByDocumentId: independence,
+        });
+        painMap = buildPainMapReport({
+          plan,
+          clusters,
+          rounds: [{ round: 1, queryIds: plan.queries.map((query) => query.id), newDocumentCount: run.documents.length, newEvidenceCount: run.evidence.length, newClusterCount: clusters.length, coverageIncomplete: incompletenessReasons.length > 0 }],
+          stopReason: incompletenessReasons.length ? "budget_exhausted_partial" : (clusters.length === 0 ? "budget_exhausted" : "saturated"),
+          documentCount: run.documents.length,
+          evidenceCount: run.evidence.length,
+          dedupeCount: Math.max(0, run.documents.length - independence.size),
+          incompleteSources: incompletenessReasons.map((reason) => reason.split(":")[0]!.trim()),
+          evidenceSnippets: run.evidence.map((item) => ({
+            clusterId: clusters.find((cluster) => cluster.documentIds.includes(item.documentId))?.id ?? "",
+            quote: item.quoteVerbatim,
+            url: item.url,
+            evidenceId: item.id,
+            signalType: item.supportsClaim,
+          })),
+        });
+        painMapMarkdown = renderPainMapMarkdown(painMap);
+      }
+    }
     const markdown = renderMarkdownReport({
       brief,
       opportunities,
@@ -792,6 +826,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       multiLaneReport,
       sourceStatuses,
       incompletenessReasons,
+      painMapMarkdown,
     });
     const outputPath = flag(rest, "--out");
     if (outputPath) await writeFile(path.resolve(outputPath), markdown, "utf8");
@@ -803,6 +838,7 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
         researchStatus,
         outputPath: outputPath ? path.resolve(outputPath) : null,
         markdown,
+        painMap,
         multiLaneReport: multiLaneReport ? { summary: multiLaneReport.summary, claimCount: multiLaneReport.claims.length, candidateCount: multiLaneReport.summary.candidates.length } : null,
         sourceStatuses,
         incompleteness: incompletenessReasons.length ? { incomplete: true, reasons: incompletenessReasons } : undefined,
