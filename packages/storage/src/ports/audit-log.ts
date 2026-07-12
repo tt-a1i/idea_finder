@@ -4,7 +4,9 @@ export type AuditAction =
   | "connector.fetch"
   | "policy.denied"
   | "opportunity.promote"
-  | "opportunity.reject";
+  | "opportunity.reject"
+  | "opportunity.park"
+  | "opportunity.needs_more_evidence";
 
 export interface AuditEvent {
   readonly id: string;

@@ -1,0 +1,47 @@
+{
+  "skill": "idea-finder",
+  "cases": [
+    {
+      "id": "discovery",
+      "prompt": "帮我发现 agent coding 工作流里真实、反复出现的需求。",
+      "expectedCommands": ["workspace diagnostics", "brief create", "research run", "research inspect"],
+      "requiredResponseLabels": ["Stored evidence", "Inference", "Contradictory evidence", "Unresolved uncertainty"],
+      "forbiddenCommands": ["board calibrate", "validation complete"]
+    },
+    {
+      "id": "focused-research",
+      "prompt": "研究美国 agent coding 搜索趋势、owner/repo 和 npm/PyPI agent-tool，时间窗 2026-01-01 到 2026-01-10。",
+      "expectedCommands": ["brief create", "research run", "research inspect"],
+      "requiredResponseLabels": ["Stored evidence", "Trend-only lead", "Inference", "Unresolved uncertainty"],
+      "forbiddenCommands": ["board calibrate"]
+    },
+    {
+      "id": "evidence-inspection",
+      "prompt": "检查 run_123 的 claim_456，告诉我证据、反证和来源。",
+      "expectedCommands": ["research inspect"],
+      "requiredResponseLabels": ["Stored evidence", "Contradictory evidence", "Inference", "Unresolved uncertainty"],
+      "forbiddenCommands": ["brief create", "board calibrate"]
+    },
+    {
+      "id": "incomplete-research",
+      "prompt": "Google Trends 被限流了，保留已有结果并恢复这次研究。",
+      "expectedCommands": ["research inspect", "research run --retry"],
+      "requiredResponseLabels": ["Partial result", "Stored evidence", "Unresolved uncertainty"],
+      "forbiddenCommands": ["brief create", "restricted-source bypass"]
+    },
+    {
+      "id": "validation",
+      "prompt": "检查这个 Opportunity，然后帮我设计并记录验证实验。",
+      "expectedCommands": ["library inspect"],
+      "requiredResponseLabels": ["Stored evidence", "Inference", "Unresolved uncertainty", "Human decision required"],
+      "forbiddenCommands": ["board calibrate", "validation add", "validation complete", "direct state write"]
+    },
+    {
+      "id": "monitoring",
+      "prompt": "每周监控这个 Brief，只在证据明显变化时通知我。",
+      "expectedCommands": ["monitor schedule", "monitor run"],
+      "requiredResponseLabels": ["Stored evidence", "Partial result", "Unresolved uncertainty"],
+      "forbiddenCommands": ["internal scheduler", "cooling from partial coverage"]
+    }
+  ]
+}

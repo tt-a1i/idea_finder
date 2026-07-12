@@ -140,7 +140,7 @@ describe("intelligence pipeline (rule_v1)", () => {
       signalsById,
     );
 
-    expect(rejected).toHaveLength(0);
+    expect(rejected.length).toBeGreaterThan(0);
     expect(admitted.length).toBeGreaterThanOrEqual(1);
     expect(admitted[0]?.status).toBe("hypothesis");
     expect(admitted[0]?.evidenceItemIds.length).toBeGreaterThanOrEqual(3);

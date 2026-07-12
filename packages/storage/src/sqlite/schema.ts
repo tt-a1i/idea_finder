@@ -1,63 +1,227 @@
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS research_runs (
+import type { DatabaseSync } from "node:sqlite";
+
+const RESEARCH_RUNS_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS research_runs (
   id TEXT PRIMARY KEY,
   hunting_task_id TEXT NOT NULL,
   status TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
   config_hash TEXT NOT NULL,
-  error_message TEXT,
-  UNIQUE (hunting_task_id, config_hash)
+  error_message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_runs_task_config
+  ON research_runs (hunting_task_id, config_hash);
+`;
+
+const LEGACY_RUN_SCOPED_TABLES = [
+  "raw_documents",
+  "chunks",
+  "raw_signals",
+  "evidence_items",
+  "opportunity_drafts",
+  "opportunities",
+  "calibration_events",
+] as const;
+
+export const SCHEMA_SQL = `
+${RESEARCH_RUNS_SCHEMA_SQL}
+
+CREATE TABLE IF NOT EXISTS hunting_briefs (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw_documents (
+CREATE TABLE IF NOT EXISTS research_run_configs (
   id TEXT PRIMARY KEY,
-  research_run_id TEXT NOT NULL,
   payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS compatibility_migrations (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS validation_experiments (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS monitor_schedules (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS monitor_comparisons (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metric_observations (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,
+  subject_external_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  collection_method TEXT NOT NULL,
+  geography TEXT NOT NULL DEFAULT '',
+  normalization_context_id TEXT NOT NULL DEFAULT '',
+  ecosystem TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  window_start_at TEXT NOT NULL DEFAULT '',
+  window_end_at TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
+);
+CREATE INDEX IF NOT EXISTS idx_metric_observations_subject_metric
+  ON metric_observations (subject_external_id, metric, observed_at);
+
+CREATE TABLE IF NOT EXISTS trend_series (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  subject_external_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  geography TEXT NOT NULL DEFAULT '',
+  normalization_context_id TEXT NOT NULL DEFAULT '',
+  ecosystem TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  window_start_at TEXT NOT NULL DEFAULT '',
+  window_end_at TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trend_series_subject_metric
+  ON trend_series (subject_external_id, metric);
+
+CREATE TABLE IF NOT EXISTS trend_events (
+  id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trend_events_series
+  ON trend_events (series_id, detected_at);
+
+CREATE TABLE IF NOT EXISTS quantitative_source_statuses (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS normalization_contexts (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  geography TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS multi_lane_reports (
+  run_id TEXT PRIMARY KEY,
+  brief_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS multi_lane_report_claims (
+  run_id TEXT NOT NULL,
+  claim_id TEXT NOT NULL,
+  PRIMARY KEY (run_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS idx_multi_lane_report_claims_claim ON multi_lane_report_claims (claim_id, run_id);
+
+CREATE TABLE IF NOT EXISTS evidence_independence (
+  run_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  independence_group_id TEXT NOT NULL,
+  content_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_independence_run_group ON evidence_independence (run_id, independence_group_id);
+
+CREATE TABLE IF NOT EXISTS follow_up_proposals (
+  run_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  trigger_series_id TEXT NOT NULL,
+  trigger_event_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_follow_up_proposals_run ON follow_up_proposals (run_id, id);
+
+CREATE TABLE IF NOT EXISTS raw_documents (
+  id TEXT NOT NULL,
+  research_run_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_raw_documents_run ON raw_documents (research_run_id);
 
 CREATE TABLE IF NOT EXISTS chunks (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_run ON chunks (research_run_id);
 
 CREATE TABLE IF NOT EXISTS raw_signals (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_raw_signals_run ON raw_signals (research_run_id);
 
 CREATE TABLE IF NOT EXISTS evidence_items (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_items_run ON evidence_items (research_run_id);
 
 CREATE TABLE IF NOT EXISTS opportunity_drafts (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunity_drafts_run ON opportunity_drafts (research_run_id);
 
 CREATE TABLE IF NOT EXISTS opportunities (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunities_run ON opportunities (research_run_id);
 
 CREATE TABLE IF NOT EXISTS calibration_events (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   research_run_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_events_run ON calibration_events (research_run_id);
+
+CREATE TABLE IF NOT EXISTS library_admission_results (
+  id TEXT NOT NULL,
+  research_run_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_library_admission_results_run ON library_admission_results (research_run_id);
+
+CREATE TABLE IF NOT EXISTS source_statuses (
+  id TEXT NOT NULL,
+  research_run_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (research_run_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_source_statuses_run ON source_statuses (research_run_id);
 
 CREATE TABLE IF NOT EXISTS pipeline_steps (
   research_run_id TEXT NOT NULL,
@@ -92,6 +256,132 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 `;
 
-export function initSchema(db: { exec(sql: string): unknown }): void {
+export function initSchema(db: DatabaseSync): void {
+  const existing = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'research_runs'",
+  ).get() as { sql?: string } | undefined;
+  if (existing?.sql?.toUpperCase().includes("UNIQUE (HUNTING_TASK_ID, CONFIG_HASH)")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE research_runs RENAME TO research_runs_legacy_identity;
+        ${RESEARCH_RUNS_SCHEMA_SQL}
+        INSERT INTO research_runs
+          (id, hunting_task_id, status, started_at, completed_at, config_hash, error_message)
+        SELECT id, hunting_task_id, status, started_at, completed_at, config_hash, error_message
+        FROM research_runs_legacy_identity;
+        DROP TABLE research_runs_legacy_identity;
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  for (const table of LEGACY_RUN_SCOPED_TABLES) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>;
+    const idColumn = columns.find((column) => column.name === "id");
+    const runColumn = columns.find((column) => column.name === "research_run_id");
+    if (idColumn?.pk === 1 && runColumn?.pk === 0) {
+      const legacyTable = `${table}_legacy_global_id`;
+      const indexName = `idx_${table}_run`;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        db.exec(`
+          ALTER TABLE ${table} RENAME TO ${legacyTable};
+          DROP INDEX IF EXISTS ${indexName};
+          CREATE TABLE ${table} (
+            id TEXT NOT NULL,
+            research_run_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (research_run_id, id)
+          );
+          INSERT INTO ${table} (id, research_run_id, payload_json)
+          SELECT id, research_run_id, payload_json FROM ${legacyTable};
+          DROP TABLE ${legacyTable};
+          CREATE INDEX ${indexName} ON ${table} (research_run_id);
+          COMMIT;
+        `);
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+  const quantitativeColumns = db.prepare("PRAGMA table_info(metric_observations)").all() as Array<{ name: string }>;
+  if (quantitativeColumns.length > 0 && !quantitativeColumns.some((column) => column.name === "normalization_context_id")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE metric_observations RENAME TO metric_observations_github_v1;
+        CREATE TABLE metric_observations (
+          id TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          subject_kind TEXT NOT NULL,
+          subject_external_id TEXT NOT NULL,
+          metric TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          collection_method TEXT NOT NULL,
+          geography TEXT NOT NULL DEFAULT '',
+          normalization_context_id TEXT NOT NULL DEFAULT '',
+          ecosystem TEXT NOT NULL DEFAULT '',
+          package_name TEXT NOT NULL DEFAULT '',
+          window_start_at TEXT NOT NULL DEFAULT '',
+          window_end_at TEXT NOT NULL DEFAULT '',
+          payload_json TEXT NOT NULL,
+          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
+        );
+        INSERT INTO metric_observations
+          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, '', '', '', '', '', '', payload_json
+        FROM metric_observations_github_v1;
+        DROP TABLE metric_observations_github_v1;
+        DROP INDEX IF EXISTS idx_metric_observations_subject_metric;
+        CREATE INDEX idx_metric_observations_subject_metric
+          ON metric_observations (subject_external_id, metric, observed_at);
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  const packageColumns = db.prepare("PRAGMA table_info(metric_observations)").all() as Array<{ name: string }>;
+  if (packageColumns.length > 0 && !packageColumns.some((column) => column.name === "ecosystem")) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE metric_observations RENAME TO metric_observations_quantitative_v2;
+        CREATE TABLE metric_observations (
+          id TEXT PRIMARY KEY, source TEXT NOT NULL, subject_kind TEXT NOT NULL,
+          subject_external_id TEXT NOT NULL, metric TEXT NOT NULL, observed_at TEXT NOT NULL,
+          collection_method TEXT NOT NULL, geography TEXT NOT NULL DEFAULT '',
+          normalization_context_id TEXT NOT NULL DEFAULT '', ecosystem TEXT NOT NULL DEFAULT '',
+          package_name TEXT NOT NULL DEFAULT '', window_start_at TEXT NOT NULL DEFAULT '',
+          window_end_at TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL,
+          UNIQUE (source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at)
+        );
+        INSERT INTO metric_observations
+          (id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, ecosystem, package_name, window_start_at, window_end_at, payload_json)
+        SELECT id, source, subject_kind, subject_external_id, metric, observed_at, collection_method, geography, normalization_context_id, '', '', '', '', payload_json
+        FROM metric_observations_quantitative_v2;
+        DROP TABLE metric_observations_quantitative_v2;
+        DROP INDEX IF EXISTS idx_metric_observations_subject_metric;
+        CREATE INDEX idx_metric_observations_subject_metric ON metric_observations (subject_external_id, metric, observed_at);
+        COMMIT;
+      `);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  const seriesColumns = db.prepare("PRAGMA table_info(trend_series)").all() as Array<{ name: string }>;
+  if (seriesColumns.length > 0 && !seriesColumns.some((column) => column.name === "normalization_context_id")) {
+    db.exec("ALTER TABLE trend_series ADD COLUMN geography TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN normalization_context_id TEXT NOT NULL DEFAULT '';");
+  }
+  const packageSeriesColumns = db.prepare("PRAGMA table_info(trend_series)").all() as Array<{ name: string }>;
+  if (packageSeriesColumns.length > 0 && !packageSeriesColumns.some((column) => column.name === "ecosystem")) {
+    db.exec("ALTER TABLE trend_series ADD COLUMN ecosystem TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN package_name TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN window_start_at TEXT NOT NULL DEFAULT ''; ALTER TABLE trend_series ADD COLUMN window_end_at TEXT NOT NULL DEFAULT ''; ");
+  }
   db.exec(SCHEMA_SQL);
 }

@@ -17,6 +17,8 @@ import type { HuntingBrief } from "../types.js";
 import type { ResearchRunner } from "../ports/research-runner.js";
 import {
   buildQueryPlanFromBrief,
+  effectiveResearchConfig,
+  effectiveResearchConfigHash,
   queryTermsFromBrief,
   resolveHarvestMode,
 } from "./query-plan-builder.js";
@@ -24,6 +26,7 @@ import {
 export interface OrchestrationRunnerOptions {
   readonly workspaceRoot: string;
   readonly harvestMode?: "manual" | "l0";
+  readonly connectors?: readonly SourceConnector[];
 }
 
 function createConnectors(
@@ -43,13 +46,13 @@ export function createOrchestrationResearchRunner(
   const pipelineDataDir = join(options.workspaceRoot, "pipeline");
 
   return {
-    async run(brief, _runId, taskId) {
+    async run(brief, request) {
       const storage = openLocalStorage({ dataDir: pipelineDataDir });
       try {
         const harvestRepo = createStorageHarvestRepository(storage);
         const harvestMode = options.harvestMode ?? resolveHarvestMode(brief);
         const harvest = createHarvestPipeline({
-          connectors: createConnectors(brief, harvestMode),
+          connectors: options.connectors ?? createConnectors(brief, harvestMode),
           repository: harvestRepo,
         });
 
@@ -70,22 +73,52 @@ export function createOrchestrationResearchRunner(
           },
         });
 
-        const queryPlan = buildQueryPlanFromBrief(brief, taskId);
-        const configHash = `cfg_${brief.slug}`;
+        const queryPlan = buildQueryPlanFromBrief(brief, request.taskId);
+        const effectiveConfig = effectiveResearchConfig(brief);
+        const configHash = effectiveResearchConfigHash(brief);
 
-        const run = orchestrator.createOrGetRun({
-          huntingTaskId: taskId,
-          configHash,
+        const run = request.execution === "new"
+          ? orchestrator.createRun({
+              runId: request.runId,
+              huntingTaskId: request.taskId,
+              configHash,
+            })
+          : orchestrator.getRun(request.runId);
+        if (!run) {
+          throw new Error(`ResearchRun not found: ${request.runId}`);
+        }
+        if (run.huntingTaskId !== request.taskId || run.configHash !== configHash) {
+          throw new Error(`ResearchRun configuration mismatch: ${request.runId}`);
+        }
+        storage.researchRunConfigs.save({
+          id: run.id,
+          effectiveConfig,
+          execution: request.execution,
         });
 
-        const completed = await orchestrator.runPipeline(run.id, { queryPlan });
+        let completed;
+        try {
+          completed = await orchestrator.runPipeline(run.id, { queryPlan });
+        } catch {
+          completed = orchestrator.getRun(run.id);
+          if (!completed) throw new Error(`ResearchRun not found after failure: ${run.id}`);
+        }
+
+        const documents = storage.rawDocuments.listByRun(run.id);
+        const sourceStatuses = storage.sourceStatuses.listByRun(run.id) as never;
 
         return {
+          execution: request.execution,
           run: completed,
+          documents,
           chunks: storage.chunks.listByRun(run.id),
           signals: storage.rawSignals.listByRun(run.id),
           evidence: storage.evidenceItems.listByRun(run.id),
           drafts: storage.opportunityDrafts.listByRun(run.id),
+          opportunities: storage.opportunities.listByRun(run.id),
+          admissionResults: storage.libraryAdmissionResults.listByRun(run.id) as never,
+          sourceStatuses,
+          config: { id: run.id, effectiveConfig, execution: request.execution },
         };
       } finally {
         storage.close();

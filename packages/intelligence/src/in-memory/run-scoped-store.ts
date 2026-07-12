@@ -18,12 +18,8 @@ export class InMemoryRunScopedStore<T extends { id: string }>
     bucket.set(entity.id, entity);
   }
 
-  get(id: string): T | null {
-    for (const bucket of this.byRun.values()) {
-      const entity = bucket.get(id);
-      if (entity) return entity;
-    }
-    return null;
+  get(runId: ResearchRunId, id: string): T | null {
+    return this.byRun.get(String(runId))?.get(id) ?? null;
   }
 
   listByRun(runId: ResearchRunId): readonly T[] {

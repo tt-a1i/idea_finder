@@ -136,7 +136,7 @@ describe("workspace vertical slice", () => {
       ),
     ).toBe(0);
 
-    expect(await runCli(["run", "demo"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "demo", "--fixture"], cliOpts)).toBe(0);
     expect(lines.some((l) => l.includes("admitted 1"))).toBe(true);
 
     const libLines = lines.length;
@@ -186,6 +186,12 @@ describe("workspace vertical slice", () => {
           "Orchestration CLI",
           "--description",
           "Manual import orchestration smoke",
+          "--manual-import",
+          "Painful workaround reconciling invoices every month.",
+          "--manual-import",
+          "Would pay for a lightweight invoicing workflow.",
+          "--manual-import",
+          "Need something simpler for month-end invoicing.",
         ],
         cliOpts,
       ),

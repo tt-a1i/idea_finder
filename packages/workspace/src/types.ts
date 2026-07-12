@@ -8,6 +8,7 @@ import type {
   OpportunityDraft,
   RawSignal,
   ResearchRun,
+  RawDocument,
   ValidationExperiment,
 } from "@idea-finder/core";
 import type { DraftRejection } from "@idea-finder/core";
@@ -17,6 +18,34 @@ import type {
   AgentPlannedEffect,
   PolicyDenial,
 } from "@idea-finder/agents";
+import type { ResearchRunExecution } from "./ports/research-runner.js";
+
+export interface StoredResearchRunConfig {
+  readonly id: string;
+  readonly effectiveConfig: Readonly<Record<string, unknown>>;
+  readonly execution: ResearchRunExecution;
+}
+
+export interface LibraryAdmissionRecord {
+  readonly id: string;
+  readonly decision: "admitted" | "rejected";
+  readonly opportunityId: string | null;
+  readonly issues: readonly { readonly code: string; readonly message: string }[];
+}
+
+export interface ResearchSourceStatus {
+  readonly id: string;
+  readonly source: string;
+  readonly requestKey: string;
+  readonly status: "success" | "failure" | "skipped" | "unauthorized" | "throttled" | "unavailable";
+  readonly itemCount: number;
+  readonly reasonCode: "none" | "zero_results" | "unauthorized" | "throttled" | "unavailable" | "failed" | "connector_missing";
+  readonly reason: string | null;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly retryAt: string | null;
+  readonly artifactIds?: readonly string[];
+}
 
 export interface ManualImportConfig {
   readonly text: string;
@@ -37,6 +66,11 @@ export interface BriefQueryPlan {
   readonly harvestMode?: "manual" | "l0";
   readonly searches?: readonly BriefSourceSearch[];
   readonly manualImports?: readonly ManualImportConfig[];
+  readonly quantitative?: {
+    readonly googleTrends?: readonly { readonly subject: string; readonly geography: string; readonly from: string; readonly to: string; readonly granularity: "day" | "week" }[];
+    readonly github?: readonly { readonly repository: string; readonly since?: string }[];
+    readonly packages?: readonly { readonly ecosystem: "npm" | "pypi"; readonly package: string; readonly from: string; readonly to: string }[];
+  };
 }
 
 /** Local hunting brief — config for a demand research workspace slice. */
@@ -50,6 +84,7 @@ export interface HuntingBrief {
   readonly successCriteria: string;
   readonly createdAt: string;
   readonly queryPlan?: BriefQueryPlan;
+  readonly origin?: { readonly kind: "trend_anomaly"; readonly parentRunId: string; readonly trendEventId: string; readonly trendSeriesId: string };
 }
 
 export interface InboxSignalSummary {
@@ -91,13 +126,18 @@ export interface AgentTask {
 }
 
 export interface StoredResearchRun {
+  readonly execution: ResearchRunExecution;
   readonly run: ResearchRun;
   readonly briefId: HuntingTaskId;
+  readonly documents: readonly RawDocument[];
   readonly chunks: readonly Chunk[];
   readonly signals: readonly RawSignal[];
   readonly evidence: readonly EvidenceItem[];
   readonly drafts: readonly OpportunityDraft[];
+  readonly opportunities: readonly Opportunity[];
   readonly rejected: readonly DraftRejection[];
+  readonly admissionResults?: readonly LibraryAdmissionRecord[];
+  readonly sourceStatuses?: readonly ResearchSourceStatus[];
   readonly admittedCount: number;
   readonly inbox: readonly InboxSignalSummary[];
 }

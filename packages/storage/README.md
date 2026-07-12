@@ -36,8 +36,22 @@ storage.close();
 
 ## Repositories
 
-- `researchRuns` — keyed by id; unique on `(huntingTaskId, configHash)` for idempotent run creation
+- `researchRuns` — keyed by run id; equal `(huntingTaskId, configHash)` values may belong to distinct intentional scans
+- `huntingBriefs`, `researchRunConfigs` — canonical Briefs and effective run configuration snapshots
 - `rawDocuments`, `chunks`, `rawSignals`, `evidenceItems`, `opportunityDrafts`, `opportunities`, `calibrationEvents` — run-scoped JSON payloads
+- `libraryAdmissionResults`, `sourceStatuses` — admitted/rejected outcomes and source execution state
+- `calibrationEvents` — append-only Decision Board history scoped by ResearchRun
+- `validationExperiments`, `monitorSchedules`, `monitorComparisons`, `agentTasks` — canonical runtime state
+- `metricObservations`, `trendSeries`, `trendEvents`, `quantitativeSourceStatuses` — canonical quantitative observations, derived momentum, provenance, and source health; stable identities and references fail closed
+- `normalizationContexts` — Google Trends relative-scale context; geography, window, comparison set, and partial-bucket identity are preserved so incompatible 0–100 values cannot be combined
+
+Package observations and series index ecosystem, canonical package name, and
+bucket window explicitly. This keeps same-named npm and PyPI packages separate
+and makes PyPI normalization aliases idempotent.
+
+Multi-lane research snapshots, evidence-independence records, and follow-up
+proposals are canonical run-scoped SQLite records. Report writes validate every
+quote, series, and observation reference before committing.
 - `pipelineSteps` — completed step markers for idempotent orchestration
 - `jobs` — idempotent enqueue by `idempotencyKey`
 - `audit` — append-only audit events

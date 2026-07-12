@@ -12,6 +12,10 @@ import type {
   SignalClusterId,
   ValidationExperimentId,
   MonitorScheduleId,
+  MetricObservationId,
+  TrendSeriesId,
+  TrendEventId,
+  NormalizationContextId,
 } from "./ids.js";
 
 export type SourceTier = "L0" | "L1" | "L2" | "L3";
@@ -66,6 +70,7 @@ export type ResearchRunStatus =
   | "running"
   | "completed"
   | "failed"
+  | "partial"
   | "cancelled";
 
 export interface RawDocument {
@@ -238,6 +243,30 @@ export interface MonitorSchedule {
   readonly lastComparedRunId: ResearchRunId | null;
   readonly enabled: boolean;
   readonly createdAt: string;
+  readonly updatedAt?: string;
+  readonly lastInvokedAt?: string | null;
+  readonly thresholds?: MonitorThresholds;
+}
+
+export interface MonitorThresholds {
+  readonly minCrossSourceGrowth: number;
+  readonly minStrongPainGrowth: number;
+  readonly minCommercialEvidenceGrowth: number;
+  readonly minCoolingEvidenceLoss: number;
+}
+
+export interface MonitorSourceCoverage {
+  readonly requestKey: string;
+  readonly source: string;
+  readonly status: "success" | "failure" | "skipped" | "unauthorized" | "throttled" | "unavailable";
+  readonly reason: string | null;
+  readonly itemCount: number;
+}
+
+export interface MonitorCoverageSnapshot {
+  readonly complete: boolean;
+  readonly sources: readonly MonitorSourceCoverage[];
+  readonly incompleteRequestKeys: readonly string[];
 }
 
 export type MonitorDiffKind = "added" | "heated" | "cooled" | "unchanged";
@@ -249,6 +278,31 @@ export interface MonitorOpportunitySnapshot {
   readonly status: OpportunityStatus;
   readonly confidence: ConfidenceLevel;
   readonly evidenceCount: number;
+  readonly monitorKey: string;
+  readonly monitorKeyVersion: "semantic-v1";
+  readonly evidenceItemIds: readonly EvidenceItemId[];
+  readonly sourceCount: number;
+  readonly strongPainCount: number;
+  readonly commercialEvidenceCount: number;
+  readonly evidenceRefs: readonly MonitorEvidenceRef[];
+}
+
+export interface MonitorEvidenceRef {
+  readonly evidenceItemId: EvidenceItemId;
+  readonly platform: string;
+  readonly url: string;
+  readonly supportsClaim: SupportsClaim;
+  readonly strength: EvidenceStrength;
+}
+
+export interface MonitorEvidenceChange {
+  readonly addedEvidenceItemIds: readonly EvidenceItemId[];
+  readonly removedEvidenceItemIds: readonly EvidenceItemId[];
+  readonly sourceCountDelta: number;
+  readonly strongPainDelta: number;
+  readonly commercialEvidenceDelta: number;
+  readonly addedEvidence: readonly MonitorEvidenceRef[];
+  readonly removedEvidence: readonly MonitorEvidenceRef[];
 }
 
 export interface MonitorDiffEntry {
@@ -259,6 +313,12 @@ export interface MonitorDiffEntry {
   readonly before: MonitorOpportunitySnapshot | null;
   readonly after: MonitorOpportunitySnapshot | null;
   readonly evidenceCountDelta: number;
+  readonly evidenceChange: MonitorEvidenceChange;
+  readonly causes: readonly string[];
+  readonly conclusive: boolean;
+  readonly coolingSuppressed: boolean;
+  readonly notify: boolean;
+  readonly notificationReasons: readonly string[];
 }
 
 export interface MonitorDiffSummary {
@@ -274,4 +334,257 @@ export interface MonitorDiff {
   readonly computedAt: string;
   readonly entries: readonly MonitorDiffEntry[];
   readonly summary: MonitorDiffSummary;
+  readonly coverage: { readonly baseline: MonitorCoverageSnapshot; readonly compare: MonitorCoverageSnapshot; readonly partial: boolean };
+  readonly notifications: { readonly triggered: boolean; readonly reasons: readonly string[]; readonly monitorKeys: readonly string[] };
+  readonly thresholds: MonitorThresholds;
 }
+
+/** Quantitative evidence is deliberately separate from qualitative RawSignal/EvidenceItem. */
+export type QuantitativeEvidenceLane = "developer_adoption" | "supply" | "search_momentum";
+
+export type GitHubMetric =
+  | "stars"
+  | "forks"
+  | "contributors"
+  | "issue_opened"
+  | "issue_closed"
+  | "open_issues"
+  | "repository_count"
+  | "trending_rank";
+
+export type GoogleTrendsMetric = "relative_search_interest";
+export type PackageEcosystem = "npm" | "pypi";
+export type PackageDownloadMetric = "downloads";
+
+export interface MetricSubject {
+  readonly kind: "repository" | "organization" | "topic" | "search_term" | "package";
+  readonly externalId: string;
+  readonly url: string;
+}
+
+export interface PackageSubject {
+  readonly kind: "package";
+  readonly ecosystem: PackageEcosystem;
+  readonly name: string;
+  readonly canonicalName: string;
+  readonly externalId: string;
+  readonly url: string;
+}
+
+export interface MetricObservationProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface: "github_rest_api" | "github_graphql_api" | "github_public_dataset";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+}
+
+export interface GitHubMetricObservation {
+  readonly id: MetricObservationId;
+  readonly subject: MetricSubject;
+  readonly source: "github";
+  readonly metric: GitHubMetric;
+  readonly lane: QuantitativeEvidenceLane;
+  readonly geography: string | null;
+  readonly observedAt: string;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly unit: "count" | "rank";
+  readonly collectionMethod: MetricObservationProvenance["interface"];
+  readonly provenance: MetricObservationProvenance;
+}
+
+export interface ObservationWindow {
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly resolution: "hour" | "day" | "week" | "month";
+  readonly timezone: string;
+}
+
+export interface GoogleTrendsNormalizationContext {
+  readonly id: NormalizationContextId;
+  readonly source: "google_trends";
+  readonly method: "relative_interest_0_100_v1";
+  readonly geography: string;
+  readonly window: ObservationWindow;
+  readonly comparisonSubjects: readonly string[];
+  /** Optional provider-declared anchor used to normalize the comparison set. */
+  readonly anchor: string | null;
+  readonly category: string;
+  readonly property: "web" | "news" | "images" | "youtube" | "shopping";
+  readonly scale: { readonly min: 0; readonly max: 100 };
+  readonly includesPartialBucket: boolean;
+}
+
+export interface GoogleTrendsObservationProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface:
+    | "google_trends_authorized_api"
+    | "google_trends_public_dataset"
+    | "recorded_fixture";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+}
+
+export interface GoogleTrendsMetricObservation {
+  readonly id: MetricObservationId;
+  readonly subject: MetricSubject & { readonly kind: "search_term" };
+  readonly source: "google_trends";
+  readonly metric: GoogleTrendsMetric;
+  readonly lane: "search_momentum";
+  readonly geography: string;
+  readonly observedAt: string;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly unit: "relative_interest_0_100";
+  readonly collectionMethod: GoogleTrendsObservationProvenance["interface"];
+  readonly normalizationContextId: NormalizationContextId;
+  readonly partial: boolean;
+  readonly provenance: GoogleTrendsObservationProvenance;
+}
+
+export interface PackageDownloadProvenance {
+  readonly collector: string;
+  readonly collectorVersion: string;
+  readonly interface: "npm_downloads_api" | "pypistats_public_api" | "recorded_fixture";
+  readonly sourceRef: string;
+  readonly collectedAt: string;
+  readonly caveat: string | null;
+}
+
+export interface PackageDownloadBucket {
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly resolution: "day" | "week" | "month";
+  readonly timezone: string;
+  readonly coverageDays: number;
+  readonly partial: boolean;
+}
+
+export interface PackageDownloadObservation {
+  readonly id: MetricObservationId;
+  readonly subject: PackageSubject;
+  readonly source: "npm_registry" | "pypi";
+  readonly ecosystem: PackageEcosystem;
+  readonly metric: PackageDownloadMetric;
+  readonly lane: "developer_adoption";
+  readonly geography: null;
+  readonly observedAt: string;
+  readonly bucket: PackageDownloadBucket;
+  readonly rawValue: number;
+  readonly normalizedValue: number;
+  readonly normalizationMethod: "bucket_count_to_daily_rate_v1";
+  readonly unit: "downloads_per_day";
+  readonly collectionMethod: PackageDownloadProvenance["interface"];
+  readonly provenance: PackageDownloadProvenance;
+}
+
+export type MetricObservation = GitHubMetricObservation | GoogleTrendsMetricObservation | PackageDownloadObservation;
+
+export interface GitHubTrendSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: MetricSubject;
+  readonly source: "github";
+  readonly metric: GitHubMetric;
+  readonly lane: QuantitativeEvidenceLane;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export interface GoogleTrendsSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: MetricSubject & { readonly kind: "search_term" };
+  readonly source: "google_trends";
+  readonly metric: GoogleTrendsMetric;
+  readonly lane: "search_momentum";
+  readonly geography: string;
+  readonly normalizationContextId: NormalizationContextId;
+  readonly window: ObservationWindow;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export interface PackageDownloadSeries {
+  readonly id: TrendSeriesId;
+  readonly subject: PackageSubject;
+  readonly source: "npm_registry" | "pypi";
+  readonly ecosystem: PackageEcosystem;
+  readonly metric: PackageDownloadMetric;
+  readonly lane: "developer_adoption";
+  readonly resolution: PackageDownloadBucket["resolution"];
+  readonly timezone: string;
+  readonly normalizationMethod: "bucket_count_to_daily_rate_v1";
+  readonly observationIds: readonly MetricObservationId[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export type TrendSeries = GitHubTrendSeries | GoogleTrendsSeries | PackageDownloadSeries;
+
+export type TrendEventKind = "momentum_up" | "momentum_down" | "stable";
+
+export interface DeltaTrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: TrendEventKind;
+  readonly detectedAt: string;
+  readonly previousObservationId: MetricObservationId;
+  readonly currentObservationId: MetricObservationId;
+  readonly previousValue: number;
+  readonly currentValue: number;
+  readonly absoluteDelta: number;
+  readonly relativeDelta: number | null;
+  readonly detector: "two_point_delta_v1";
+}
+
+export type SearchMomentumPattern =
+  | "spike"
+  | "seasonal"
+  | "sustained_growth"
+  | "insufficient_history"
+  | "no_pattern";
+
+export interface SearchMomentumClassifierRules {
+  readonly minHistoryBuckets: number;
+  readonly spikeBaselineBuckets: number;
+  readonly spikeMultiplier: number;
+  readonly spikeReturnRatio: number;
+  readonly seasonalPeriodBuckets: number;
+  readonly seasonalMinPeriods: number;
+  readonly seasonalCorrelationThreshold: number;
+  readonly seasonalMaxLevelShiftRatio: number;
+  readonly growthWindowBuckets: number;
+  readonly growthMinRelativeIncrease: number;
+  readonly growthMinPositiveStepRatio: number;
+}
+
+export interface SearchMomentumTrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: SearchMomentumPattern;
+  readonly detectedAt: string;
+  readonly observationIds: readonly MetricObservationId[];
+  readonly normalizationContextId: NormalizationContextId;
+  readonly detector: "search_momentum_v1";
+  readonly rules: SearchMomentumClassifierRules;
+}
+
+export interface PackageDownloadTrendEvent {
+  readonly id: TrendEventId;
+  readonly seriesId: TrendSeriesId;
+  readonly kind: TrendEventKind;
+  readonly detectedAt: string;
+  readonly previousObservationId: MetricObservationId;
+  readonly currentObservationId: MetricObservationId;
+  readonly previousValue: number;
+  readonly currentValue: number;
+  readonly absoluteDelta: number;
+  readonly relativeDelta: number | null;
+  readonly detector: "package_download_delta_v1";
+  readonly stableRelativeThreshold: number;
+}
+
+export type TrendEvent = DeltaTrendEvent | SearchMomentumTrendEvent | PackageDownloadTrendEvent;

@@ -9,9 +9,13 @@ export function createResearchRunRepository(db: DatabaseSync): ResearchRunReposi
     `SELECT id, hunting_task_id, status, started_at, completed_at, config_hash, error_message
      FROM research_runs WHERE id = ?`,
   );
-  const findStmt = db.prepare(
+  const listStmt = db.prepare(
     `SELECT id, hunting_task_id, status, started_at, completed_at, config_hash, error_message
-     FROM research_runs WHERE hunting_task_id = ? AND config_hash = ?`,
+     FROM research_runs ORDER BY rowid`,
+  );
+  const listByTaskStmt = db.prepare(
+    `SELECT id, hunting_task_id, status, started_at, completed_at, config_hash, error_message
+     FROM research_runs WHERE hunting_task_id = ? ORDER BY rowid`,
   );
   const upsertStmt = db.prepare(
     `INSERT INTO research_runs
@@ -31,9 +35,11 @@ export function createResearchRunRepository(db: DatabaseSync): ResearchRunReposi
       const row = getStmt.get(id) as Row | undefined;
       return row ? rowToRun(row) : null;
     },
-    findByTaskAndConfig(huntingTaskId, configHash) {
-      const row = findStmt.get(huntingTaskId, configHash) as Row | undefined;
-      return row ? rowToRun(row) : null;
+    list() {
+      return (listStmt.all() as unknown as Row[]).map(rowToRun);
+    },
+    listByTask(huntingTaskId) {
+      return (listByTaskStmt.all(huntingTaskId) as unknown as Row[]).map(rowToRun);
     },
     save(run) {
       upsertStmt.run(

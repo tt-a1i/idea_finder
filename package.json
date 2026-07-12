@@ -1,24 +1,40 @@
 {
   "name": "idea-finder",
-  "private": true,
+  "version": "0.0.0",
+  "private": false,
   "type": "module",
+  "bin": {
+    "idea-finder": "./bin/idea-finder.js"
+  },
+  "files": [
+    "bin/idea-finder.js",
+    "dist/idea-finder.js",
+    "skills/idea-finder"
+  ],
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && npm run bundle",
+    "prepack": "npm run build",
+    "bundle": "esbuild packages/workspace/src/cli/bin.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/idea-finder.js",
     "dev": "tsc --build --watch",
     "test": "vitest run",
+    "test:live-smoke": "IDEA_FINDER_LIVE_SMOKE=1 vitest run packages/harvest/test/harvest-pipeline.test.ts -t 'live smoke'",
+    "test:skill-agent": "node scripts/run-skill-agent-eval.mjs",
     "typecheck": "tsc --build",
+    "release:smoke": "vitest run packages/workspace/test/standalone-cli.e2e.spec.ts packages/workspace/test/idea-finder-skill.eval.spec.ts",
+    "release:gate": "npm run typecheck && npm test",
     "lint": "npm run typecheck && npm run test",
-    "cli": "npm run build -w @idea-finder/workspace && node packages/workspace/dist/cli/bin.js",
+    "cli": "npm run build && node dist/idea-finder.js",
     "web:dev": "npm run dev -w @idea-finder/web",
     "web:build": "npm run build -w @idea-finder/web",
     "web:typecheck": "npm run typecheck -w @idea-finder/web"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
+    "esbuild": "0.28.1",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },

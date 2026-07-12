@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { runCli } from "../src/cli/main.js";
 import { resolveWorkspacePaths } from "../src/storage/workspace-store.js";
 import { WorkspaceService } from "../src/workspace-service.js";
+import { createFixtureResearchRunner } from "../src/ports/runner-impl.js";
 
 describe("validation and monitor diff", () => {
   it("promoted opportunity → validation experiment → result updates metadata", async () => {
@@ -60,6 +61,7 @@ describe("validation and monitor diff", () => {
 
     const run1 = await svc.runResearch(brief.slug);
     const run2 = await svc.runResearch(brief.slug);
+    await svc.setMonitorSchedule({ briefSlugOrId: brief.slug, cadence: "manual" });
 
     const diff = await svc.compareMonitorDiff({
       briefSlugOrId: brief.slug,
@@ -73,7 +75,31 @@ describe("validation and monitor diff", () => {
     );
 
     const schedule = await svc.getMonitorSchedule(brief.slug);
-    expect(schedule?.lastComparedRunId).toBe(run2.run.id);
+    expect(schedule?.lastComparedRunId).toBeNull();
+  });
+
+  it("external monitor invocations create fresh runs, advance the cursor, and suppress false cooling under partial coverage", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-monitor-run-"));
+    try {
+      const paths = resolveWorkspacePaths(root);
+      const service = new WorkspaceService({ paths, runnerMode: "fixture" });
+      const brief = await service.createBrief({ slug: "continuous", title: "Continuous", description: "external scheduler" });
+      const schedule = await service.setMonitorSchedule({ briefSlugOrId: brief.id, cadence: "daily", thresholds: { minCoolingEvidenceLoss: 2 } });
+      expect(schedule).toMatchObject({ cadence: "daily", thresholds: { minCoolingEvidenceLoss: 2 } });
+      const baseline = await service.invokeMonitor({ briefSlugOrId: brief.id });
+      expect(baseline).toMatchObject({ baselineRunId: null, comparison: null });
+      const compared = await service.invokeMonitor({ briefSlugOrId: brief.id });
+      expect(compared.run.run.id).not.toBe(baseline.run.run.id);
+      expect(compared).toMatchObject({ baselineRunId: baseline.run.run.id, comparison: { diff: { baselineRunId: baseline.run.run.id, compareRunId: compared.run.run.id } } });
+      const partialService = new WorkspaceService({ paths, runner: createFixtureResearchRunner("partial-zero") });
+      const partial = await partialService.invokeMonitor({ briefSlugOrId: brief.id });
+      expect(partial.run.run.status).toBe("partial");
+      expect(partial.comparison?.diff.coverage.partial).toBe(true);
+      expect(partial.comparison?.diff.summary.cooled).toBe(0);
+      expect(partial.comparison?.diff.entries.some((entry) => entry.coolingSuppressed && !entry.conclusive)).toBe(true);
+      const restarted = new WorkspaceService({ paths, runnerMode: "fixture" });
+      expect(await restarted.getMonitorSchedule(brief.id)).toMatchObject({ cadence: "daily", lastComparedRunId: partial.run.run.id, lastInvokedAt: expect.any(String) });
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("CLI: validation add/list/complete and monitor diff", async () => {
@@ -92,7 +118,7 @@ describe("validation and monitor diff", () => {
         cliOpts,
       ),
     ).toBe(0);
-    expect(await runCli(["run", "v"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "v", "--fixture"], cliOpts)).toBe(0);
 
     const libStart = lines.length;
     expect(await runCli(["library", "--brief", "v"], cliOpts)).toBe(0);
@@ -147,7 +173,7 @@ describe("validation and monitor diff", () => {
       ),
     ).toBe(0);
 
-    expect(await runCli(["run", "v"], cliOpts)).toBe(0);
+    expect(await runCli(["run", "v", "--fixture"], cliOpts)).toBe(0);
     const state = await new WorkspaceService({
       paths: resolveWorkspacePaths(root),
       runnerMode: "fixture",

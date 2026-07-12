@@ -31,8 +31,10 @@ export type OrchestratorStores = Pick<
   | "evidenceItems"
   | "opportunityDrafts"
   | "opportunities"
+  | "libraryAdmissionResults"
   | "calibrationEvents"
   | "pipelineSteps"
+  | "sourceStatuses"
   | "audit"
 >;
 
@@ -45,6 +47,7 @@ export interface ResearchRunOrchestratorDeps {
 export interface CreateRunRequest {
   readonly huntingTaskId: HuntingTaskId;
   readonly configHash: string;
+  readonly runId?: ResearchRunId;
 }
 
 export interface RunPipelineOptions {
@@ -52,7 +55,7 @@ export interface RunPipelineOptions {
 }
 
 export interface ResearchRunOrchestrator {
-  createOrGetRun(request: CreateRunRequest): ResearchRun;
+  createRun(request: CreateRunRequest): ResearchRun;
   getRun(runId: ResearchRunId): ResearchRun | null;
   runPipeline(
     runId: ResearchRunId,
@@ -66,17 +69,12 @@ export function createResearchRunOrchestrator(
   const { stores, harvest, intelligence } = deps;
 
   return {
-    createOrGetRun(request) {
-      const existing = stores.researchRuns.findByTaskAndConfig(
-        request.huntingTaskId,
-        request.configHash,
-      );
-      if (existing) {
-        return existing;
+    createRun(request) {
+      if (request.runId && stores.researchRuns.get(request.runId)) {
+        throw new Error(`ResearchRun already exists: ${request.runId}`);
       }
-
       const run: ResearchRun = {
-        id: asId(`run_${randomUUID()}`),
+        id: request.runId ?? asId(`run_${randomUUID()}`),
         huntingTaskId: request.huntingTaskId,
         status: "pending",
         startedAt: null,
@@ -102,51 +100,63 @@ export function createResearchRunOrchestrator(
         return run;
       }
 
-      if (run.status === "pending") {
+      if (run.status !== "running") {
         run = {
           ...run,
           status: "running",
-          startedAt: new Date().toISOString(),
+          startedAt: run.startedAt ?? new Date().toISOString(),
+          completedAt: null,
+          errorMessage: null,
         };
         stores.researchRuns.save(run);
       }
 
       try {
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest)) {
-          await harvest.runHarvest(runId, options.queryPlan);
-          stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.harvest);
-        }
+        const harvestAlreadyComplete = stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest);
+        const priorStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ id: string; status: string }>;
+        const completedRequestKeys = new Set(priorStatuses.filter((item) => item.status === "success").map((item) => item.id));
+        const harvestResult = harvestAlreadyComplete ? null : await harvest.runHarvest(runId, options.queryPlan, { completedRequestKeys });
+        for (const status of harvestResult?.sourceExecutions ?? []) stores.sourceStatuses.save(runId, status);
+        const sourceStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ status: string; reason: string | null }>;
+        const incompleteSources = sourceStatuses.filter((item) => item.status !== "success");
+        const hasSuccessfulSource = sourceStatuses.some((item) => item.status === "success");
+        const newlySuccessfulHarvest = (harvestResult?.sourceExecutions ?? []).some((item) => item.status === "success");
+        if (!harvestAlreadyComplete && incompleteSources.length === 0) stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.harvest);
+        if (!hasSuccessfulSource && incompleteSources.length > 0) throw new Error(incompleteSources.map((item) => item.reason).filter(Boolean).join("; ") || "All research sources failed");
 
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence)) {
+        // Re-run intelligence/admission when harvest recovers sources, even if a prior
+        // partial pass marked those steps complete before the new documents existed.
+        const shouldRefreshDownstream =
+          incompleteSources.length > 0 || newlySuccessfulHarvest;
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || shouldRefreshDownstream) {
           await intelligence.run(runId);
-          stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);
+          if (incompleteSources.length === 0) {
+            stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);
+          }
         }
 
-        if (
-          !stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission)
-        ) {
-          admitRunToLibrary(runId, stores);
-          stores.pipelineSteps.markComplete(
-            runId,
-            PIPELINE_STEPS.libraryAdmission,
-          );
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission) || shouldRefreshDownstream) {
+          await admitRunToLibrary(runId, stores);
+          if (incompleteSources.length === 0) {
+            stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.libraryAdmission);
+          }
         }
 
         run = {
           ...run,
-          status: "completed",
+          status: incompleteSources.length > 0 ? "partial" : "completed",
           completedAt: new Date().toISOString(),
-          errorMessage: null,
+          errorMessage: incompleteSources.length > 0 ? incompleteSources.map((item) => item.reason).filter(Boolean).join("; ") : null,
         };
         stores.researchRuns.save(run);
 
         await stores.audit.append({
           at: new Date().toISOString(),
           actor: "pipeline",
-          action: "opportunity.promote",
+          action: incompleteSources.length > 0 ? "opportunity.needs_more_evidence" : "opportunity.promote",
           resource: runId,
           payload: {
-            step: "pipeline_complete",
+            step: incompleteSources.length > 0 ? "pipeline_partial" : "pipeline_complete",
             opportunityCount: stores.opportunities.listByRun(runId).length,
           },
         });
@@ -162,7 +172,7 @@ export function createResearchRunOrchestrator(
   };
 }
 
-function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): void {
+async function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): Promise<void> {
   const drafts = stores.opportunityDrafts.listByRun(runId);
   const evidence = stores.evidenceItems.listByRun(runId);
   const chunks = stores.chunks.listByRun(runId);
@@ -189,8 +199,19 @@ function admitRunToLibrary(runId: ResearchRunId, stores: OrchestratorStores): vo
     stores.opportunities.save(runId, opportunity);
   }
 
+  for (const draft of drafts) {
+    const opportunity = admitted.find((item) => item.id === `opp_${draft.id}`);
+    const rejection = rejected.find((entry) => entry.draftId === draft.id);
+    stores.libraryAdmissionResults.save(runId, {
+      id: draft.id,
+      decision: opportunity ? "admitted" : "rejected",
+      opportunityId: opportunity?.id ?? null,
+      issues: rejection?.issues ?? [],
+    });
+  }
+
   if (rejected.length > 0) {
-    void stores.audit.append({
+    await stores.audit.append({
       at: new Date().toISOString(),
       actor: "pipeline",
       action: "policy.denied",

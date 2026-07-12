@@ -3,7 +3,7 @@ import type { HarvestRepository } from "@idea-finder/harvest";
 import type { LocalStorage } from "@idea-finder/storage";
 
 export function createStorageHarvestRepository(
-  stores: Pick<LocalStorage, "rawDocuments" | "chunks" | "rawSignals">,
+  stores: Pick<LocalStorage, "rawDocuments" | "chunks" | "rawSignals" | "sourceStatuses" | "transaction">,
 ): HarvestRepository {
   return {
     async saveResult(runId: ResearchRunId, result) {
@@ -17,6 +17,14 @@ export function createStorageHarvestRepository(
         stores.rawSignals.save(runId, signal);
       }
     },
+    async saveSourceResult(runId, result, execution) {
+      stores.transaction(() => {
+        for (const document of result.documents) stores.rawDocuments.save(runId, document);
+        for (const chunk of result.chunks) stores.chunks.save(runId, chunk);
+        for (const signal of result.signals) stores.rawSignals.save(runId, signal);
+        stores.sourceStatuses.save(runId, execution);
+      });
+    },
     async getResult(runId) {
       const documents = stores.rawDocuments.listByRun(runId);
       const chunks = stores.chunks.listByRun(runId);
@@ -24,7 +32,7 @@ export function createStorageHarvestRepository(
       if (documents.length === 0 && chunks.length === 0 && signals.length === 0) {
         return null;
       }
-      return { documents, chunks, signals };
+      return { documents, chunks, signals, sourceExecutions: [] };
     },
   };
 }

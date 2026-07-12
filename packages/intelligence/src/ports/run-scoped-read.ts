@@ -3,7 +3,6 @@ import type { Chunk, RawDocument, RawSignal, ResearchRunId } from "@idea-finder/
 /** Read run-scoped harvest entities for intelligence. */
 export interface RunScopedReader<T extends { id: string }> {
   listByRun(runId: ResearchRunId): readonly T[];
-  get(id: string): T | null;
 }
 
 export interface IntelligenceReadPorts {

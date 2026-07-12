@@ -12,6 +12,7 @@ import {
   createStackExchangeConnector,
   createV2exConnector,
   type QueryPlan,
+  type SourceConnector,
 } from "@idea-finder/connectors";
 
 import { createHarvestPipeline } from "../src/harvest-pipeline.js";
@@ -59,6 +60,41 @@ afterEach(() => {
 });
 
 describe("harvest pipeline", () => {
+  it("retains successful evidence and records zero, unauthorized, throttled, unavailable, failure, and skipped outcomes", async () => {
+    const connector = (platform: string, message?: string): SourceConnector => ({
+      platform,
+      async healthcheck() { return { ok: true }; },
+      async *search() { if (message) throw new Error(message); },
+      async fetch() { throw new Error("not used"); },
+    });
+    const repository = new InMemoryHarvestRepository();
+    const pipeline = createHarvestPipeline({
+      connectors: [createManualImportConnector(), connector("zero"), connector("auth", "401 unauthorized"), connector("rate", "429 rate limited; retry-after=60"), connector("down", "network unavailable"), connector("broken", "malformed response")],
+      repository,
+    });
+    const plan: QueryPlan = {
+      huntingTaskId: taskId,
+      searches: ["zero", "auth", "rate", "down", "broken", "missing"].map((platform) => ({ platform, terms: ["x"] })),
+      manualImports: [{ text: "Manual retained evidence: this workflow is painful." }],
+    };
+    const result = await pipeline.runHarvest(runId, plan);
+    expect(result.documents).toHaveLength(1);
+    expect(result.sourceExecutions.map((item) => [item.source, item.status, item.reasonCode])).toEqual([
+      ["zero", "success", "zero_results"], ["auth", "unauthorized", "unauthorized"], ["rate", "throttled", "throttled"],
+      ["down", "unavailable", "unavailable"], ["broken", "failure", "failed"], ["missing", "skipped", "connector_missing"], ["manual", "success", "none"],
+    ]);
+    expect((await repository.getResult(runId))?.documents).toHaveLength(1);
+  });
+
+  it("does not misclassify persistence failures as source outcomes", async () => {
+    const connector: SourceConnector = {
+      platform: "zero", async healthcheck() { return { ok: true }; }, async *search() {}, async fetch() { throw new Error("not used"); },
+    };
+    const pipeline = createHarvestPipeline({ connectors: [connector], repository: {
+      async saveResult() {}, async getResult() { return null; }, async saveSourceResult() { throw new Error("SQLITE_FULL"); },
+    } });
+    await expect(pipeline.runHarvest(runId, { huntingTaskId: taskId, searches: [{ platform: "zero", terms: ["x"] }] })).rejects.toThrow("SQLITE_FULL");
+  });
   it("runs connectors, chunks, detects signals, and persists via repository", async () => {
     const fetchFn = mockFetch();
     const connectors = [
@@ -104,7 +140,9 @@ describe("harvest pipeline", () => {
   });
 });
 
-describe.skip("live smoke (optional)", () => {
+const describeLive = process.env.IDEA_FINDER_LIVE_SMOKE === "1" ? describe : describe.skip;
+
+describeLive("live smoke (optional)", () => {
   it("hits HN Algolia with real network", async () => {
     const connector = createHnAlgoliaConnector();
     const docs = [];

@@ -1,4 +1,5 @@
 import { asId } from "./ids.js";
+import { randomUUID } from "node:crypto";
 import type { CalibrationEventId, ChunkId } from "./ids.js";
 import type {
   ActorKind,
@@ -15,6 +16,7 @@ import {
   isAgentActor,
   validateOpportunity,
 } from "./validation.js";
+import type { CorroborationContext } from "./multi-lane-research.js";
 
 export interface CalibrationResult {
   opportunity: Opportunity;
@@ -25,6 +27,7 @@ export interface CalibrationValidationContext {
   evidenceById: ReadonlyMap<EvidenceItem["id"], EvidenceItem>;
   chunksById: ReadonlyMap<ChunkId, Chunk>;
   signalsById: ReadonlyMap<RawSignal["id"], RawSignal>;
+  corroborationContext?: CorroborationContext;
 }
 
 function statusForAction(action: CalibrationAction): OpportunityStatus {
@@ -59,6 +62,7 @@ function assertPromoteEligible(
     validationContext.evidenceById,
     validationContext.chunksById,
     validationContext.signalsById,
+    validationContext.corroborationContext,
   );
 
   if (!result.ok) {
@@ -101,7 +105,7 @@ export function applyCalibration(
     action === "promote" ? actor : opportunity.provenance.promotedBy;
 
   const event: CalibrationEvent = {
-    id: asId<CalibrationEventId>(`cal_${opportunity.id}_${Date.now()}`),
+    id: asId<CalibrationEventId>(`cal_${opportunity.id}_${randomUUID()}`),
     opportunityId: opportunity.id,
     actor,
     action,

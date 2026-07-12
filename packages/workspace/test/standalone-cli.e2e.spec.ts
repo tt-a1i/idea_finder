@@ -1,0 +1,603 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+  CLI_CONTRACT_VERSION,
+  CLI_EXIT_CODES,
+  type CliMachineEnvelope,
+} from "../src/cli/contract.js";
+import { createMachineEnvelope } from "../src/cli/main.js";
+import { emptyWorkspaceState } from "../src/types.js";
+
+const exec = promisify(execFile);
+const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
+
+interface Invocation {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly envelope: CliMachineEnvelope;
+}
+
+async function invoke(executable: string, args: readonly string[], cwd: string): Promise<Invocation> {
+  try {
+    const result = await exec(executable, [...args], { cwd });
+    return {
+      code: 0,
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim(),
+      envelope: JSON.parse(result.stdout) as CliMachineEnvelope,
+    };
+  } catch (error) {
+    const failure = error as Error & { code: number; stdout: string; stderr: string };
+    return {
+      code: failure.code,
+      stdout: failure.stdout.trim(),
+      stderr: failure.stderr.trim(),
+      envelope: JSON.parse(failure.stdout) as CliMachineEnvelope,
+    };
+  }
+}
+
+async function invokeHuman(executable: string, args: readonly string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    const result = await exec(executable, [...args], { cwd });
+    return { code: 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+  } catch (error) {
+    const failure = error as Error & { code: number; stdout: string; stderr: string };
+    return { code: failure.code, stdout: failure.stdout.trim(), stderr: failure.stderr.trim() };
+  }
+}
+
+describe("installed standalone CLI", () => {
+  let consumer: string;
+  let executable: string;
+  let workspace: string;
+  let packedFiles: string[];
+
+  beforeAll(async () => {
+    const packDirectory = await mkdtemp(path.join(os.tmpdir(), "idea-finder-pack-"));
+    const packed = await exec("npm", ["pack", "--pack-destination", packDirectory, "--json"], { cwd: repositoryRoot });
+    const packResult = JSON.parse(packed.stdout) as Array<{ filename: string; files: Array<{ path: string }> }>;
+    packedFiles = packResult[0]!.files.map((file) => file.path).sort();
+    const tarball = path.join(packDirectory, packResult[0]!.filename);
+
+    consumer = await mkdtemp(path.join(os.tmpdir(), "idea-finder-consumer-"));
+    await writeFile(path.join(consumer, "package.json"), '{"private":true}\n', "utf8");
+    await exec("npm", ["install", "--ignore-scripts", "--no-audit", "--offline", tarball], { cwd: consumer });
+    executable = path.join(consumer, "node_modules", ".bin", "idea-finder");
+    workspace = path.join(consumer, "workspace");
+  }, 30_000);
+
+  it("ships only the executable, package metadata, README, and companion Skill assets", () => {
+    expect(packedFiles).toEqual([
+      "README.md",
+      "bin/idea-finder.js",
+      "dist/idea-finder.js",
+      "package.json",
+      "skills/idea-finder/SKILL.md",
+      "skills/idea-finder/agents/openai.yaml",
+      "skills/idea-finder/evals/cases.json",
+      "skills/idea-finder/evals/traces.json",
+      "skills/idea-finder/references/cli-workflows.md",
+    ]);
+    expect(packedFiles.some((file) => /(^|\/)(?:data|\.scratch|node_modules)(\/|$)|\.env|secret|credential/i.test(file))).toBe(false);
+  });
+
+  it("installs into a clean consumer and exposes diagnostics plus Brief create/list", async () => {
+    const diagnostics = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    expect(diagnostics.code).toBe(CLI_EXIT_CODES.success);
+    expect(diagnostics.stderr).toBe("");
+    expect(diagnostics.envelope).toMatchObject({
+      contractVersion: CLI_CONTRACT_VERSION,
+      command: "workspace diagnostics",
+      status: "success",
+      warnings: [],
+      incompleteness: { incomplete: false, reasons: [] },
+      errors: [],
+      data: { workspace: path.resolve(workspace), accessible: true, counts: { briefs: 0 } },
+    });
+
+    const created = await invoke(executable, ["brief", "create", "agents", "--title", "Agent demand", "--workspace", workspace, "--json"], consumer);
+    expect(created.code).toBe(0);
+    expect(created.envelope).toMatchObject({ command: "brief create", status: "success", data: { brief: { slug: "agents", title: "Agent demand" } } });
+
+    const listed = await invoke(executable, ["brief", "list", "--workspace", workspace, "--json"], consumer);
+    expect(listed.envelope).toMatchObject({ command: "brief list", data: { briefs: [{ slug: "agents", title: "Agent demand" }] } });
+    const discovery = await invoke(executable, ["brief", "create", "public-discovery", "--title", "Public discovery", "--source", "hn", "--source", "stack_exchange", "--term", "agent coding", "--workspace", workspace, "--json"], consumer);
+    expect(discovery.code).toBe(0);
+    expect(discovery.envelope).toMatchObject({ data: { brief: { queryPlan: { harvestMode: "l0", searches: [expect.objectContaining({ platform: "hn", terms: ["agent coding"] }), expect.objectContaining({ platform: "stack_exchange", terms: ["agent coding"] })] } } } });
+    for (const orphan of [["--term", "orphan"], ["--app-id", "123"], ["--stackexchange-site", "stackoverflow"]]) {
+      const rejected = await invoke(executable, ["brief", "create", `orphan-${orphan[0]!.slice(2)}`, "--title", "Orphan option", ...orphan, "--workspace", workspace, "--json"], consumer);
+      expect(rejected.code).toBe(CLI_EXIT_CODES.usage);
+    }
+    expect((await invoke(executable, ["brief", "create", "qualitative-inspect", "--title", "Qualitative inspect", "--manual-import", "This reconciliation workaround is painful every week.", "--workspace", workspace, "--json"], consumer)).code).toBe(0);
+    const qualitativeRun = await invoke(executable, ["research", "run", "qualitative-inspect", "--workspace", workspace, "--json"], consumer);
+    expect(qualitativeRun.code).toBe(0);
+    const qualitativeRunId = (qualitativeRun.envelope.data as { runId: string }).runId;
+    const qualitativeInspect = await invoke(executable, ["research", "inspect", qualitativeRunId, "--workspace", workspace, "--json"], consumer);
+    expect(qualitativeInspect.code).toBe(0);
+    expect(qualitativeInspect.envelope).toMatchObject({ data: { claims: expect.arrayContaining([expect.objectContaining({ lane: "qualitative_demand" })]), details: expect.arrayContaining([expect.objectContaining({ evidence: expect.objectContaining({ quoteVerbatim: expect.stringContaining("painful"), url: expect.any(String) }), document: expect.any(Object) })]) } });
+  });
+
+  it("returns the pinned envelope from every implemented command", async () => {
+    const expectSuccess = (invocation: Invocation, command: string): void => {
+      expect(invocation.code).toBe(0);
+      expect(invocation.envelope).toMatchObject({
+        contractVersion: CLI_CONTRACT_VERSION,
+        command,
+        status: "success",
+        warnings: [],
+        incompleteness: { incomplete: false, reasons: [] },
+        errors: [],
+      });
+      expect(invocation.envelope).toHaveProperty("data");
+    };
+
+    expectSuccess(await invoke(executable, ["help", "--json"], consumer), "help");
+    const run = await invoke(executable, ["run", "agents", "--fixture", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(run, "run");
+    const runId = (run.envelope.data as { run: { id: string } }).run.id;
+    expectSuccess(await invoke(executable, ["inbox", "--brief", "agents", "--workspace", workspace, "--json"], consumer), "inbox");
+    const library = await invoke(executable, ["library", "--brief", "agents", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(library, "library");
+    const opportunityId = (library.envelope.data as { opportunities: Array<{ id: string }> }).opportunities[0]!.id;
+    expectSuccess(await invoke(executable, ["board", "calibrate", opportunityId, "--action", "promote", "--run", runId, "--workspace", workspace, "--json"], consumer), "board calibrate");
+
+    const validation = await invoke(executable, ["validation", "add", opportunityId, "--type", "mom_test", "--hypothesis", "Users have this pain", "--run", runId, "--start", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(validation, "validation add");
+    const experimentId = (validation.envelope.data as { experiment: { id: string } }).experiment.id;
+    expectSuccess(await invoke(executable, ["validation", "list", "--opportunity", opportunityId, "--workspace", workspace, "--json"], consumer), "validation list");
+    expectSuccess(await invoke(executable, ["validation", "complete", experimentId, "--outcome", "inconclusive", "--summary", "More interviews needed", "--workspace", workspace, "--json"], consumer), "validation complete");
+
+    const monitorSchedule = await invoke(executable, ["monitor", "schedule", "agents", "--cadence", "weekly", "--min-cooling-loss", "2", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorSchedule, "monitor schedule");
+    expect(monitorSchedule.envelope).toMatchObject({ data: { schedule: { cadence: "weekly", thresholds: { minCoolingEvidenceLoss: 2 } } } });
+    const monitorBaseline = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorBaseline, "monitor run");
+    expect(monitorBaseline.envelope).toMatchObject({ data: { baselineRunId: null, comparison: null, run: { run: { id: expect.any(String) } } } });
+    const monitorCompare = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--fixture-source-outcome", "pain-growth", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(monitorCompare, "monitor run");
+    const baselineMonitorRunId = (monitorBaseline.envelope.data as { run: { run: { id: string } } }).run.run.id;
+    const compareMonitorRunId = (monitorCompare.envelope.data as { run: { run: { id: string } } }).run.run.id;
+    expect(compareMonitorRunId).not.toBe(baselineMonitorRunId);
+    expect(monitorCompare.envelope).toMatchObject({ data: { baselineRunId: baselineMonitorRunId, comparison: { diff: { baselineRunId: baselineMonitorRunId, compareRunId: compareMonitorRunId, entries: expect.arrayContaining([expect.objectContaining({ evidenceChange: expect.objectContaining({ strongPainDelta: 1 }), causes: expect.any(Array), notificationReasons: expect.arrayContaining(["strong_pain_growth"]) })]), notifications: { triggered: true, reasons: expect.arrayContaining(["strong_pain_growth"]) } } } } });
+    const monitorPartial = await invoke(executable, ["monitor", "run", "agents", "--fixture", "--fixture-source-outcome", "partial-zero", "--workspace", workspace, "--json"], consumer);
+    expect(monitorPartial.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(monitorPartial.envelope).toMatchObject({ status: "partial", data: { comparison: { diff: { coverage: { partial: true }, summary: { cooled: 0 }, entries: [expect.objectContaining({ coolingSuppressed: true, conclusive: false })] } } } });
+    expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--workspace", workspace, "--json"], consumer), "trends collect");
+    expectSuccess(await invoke(executable, ["trends", "collect", "github", "owner/repo", "--fixture", "--fixture-time", "2026-07-12T00:00:00.000Z", "--fixture-stars", "180", "--workspace", workspace, "--json"], consumer), "trends collect");
+    const installedObservations = await invoke(executable, ["trends", "observations", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedObservations, "trends observations");
+    expect((installedObservations.envelope.data as { observations: unknown[] }).observations).toHaveLength(2);
+    const installedSeries = await invoke(executable, ["trends", "series", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedSeries, "trends series");
+    expect((installedSeries.envelope.data as { series: Array<{ observationIds: unknown[] }> }).series[0]?.observationIds).toHaveLength(2);
+    const installedEvents = await invoke(executable, ["trends", "events", "--subject", "owner/repo", "--metric", "stars", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(installedEvents, "trends events");
+    expect(installedEvents.envelope).toMatchObject({ data: { events: [expect.objectContaining({ kind: "momentum_up", previousValue: 120, currentValue: 180 })] } });
+    const googleCollected = await invoke(executable, ["trends", "collect", "google", "agent coding", "--geo", "US", "--from", "2026-01-01T00:00:00Z", "--to", "2026-01-10T00:00:00Z", "--fixture", "--fixture-pattern", "sustained", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(googleCollected, "trends collect");
+    expect(googleCollected.envelope).toMatchObject({ data: { event: { kind: "sustained_growth" }, context: { geography: "US" } } });
+    const googleInspected = await invoke(executable, ["trends", "inspect", "google", "agent coding", "--geo", "US", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(googleInspected, "trends inspect");
+    expect(googleInspected.envelope).toMatchObject({ data: { observations: expect.any(Array), events: [expect.objectContaining({ kind: "sustained_growth" })] } });
+    expect((googleInspected.envelope.data as { observations: unknown[] }).observations).toHaveLength(6);
+    const googleThrottled = await invoke(executable, ["trends", "collect", "google", "blocked term", "--geo", "US", "--from", "2026-01-01T00:00:00Z", "--to", "2026-01-10T00:00:00Z", "--fixture", "--fixture-failure", "throttled", "--workspace", workspace, "--json"], consumer);
+    expect(googleThrottled.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(googleThrottled.envelope).toMatchObject({ status: "partial", incompleteness: { incomplete: true, reasons: [expect.stringContaining("throttled")] }, errors: [{ code: "google_trends.throttled" }], data: { retryAt: "2026-01-11T00:00:00.000Z", sourceHealth: [expect.objectContaining({ status: "throttled", itemCount: 0 })] } });
+    for (const ecosystem of ["npm", "pypi"] as const) {
+      const packageCollected = await invoke(executable, ["trends", "collect", ecosystem, "requests", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--workspace", workspace, "--json"], consumer);
+      expectSuccess(packageCollected, "trends collect");
+      expect(packageCollected.envelope).toMatchObject({ data: { observations: expect.any(Array), event: { kind: "momentum_up" } } });
+      const packageInspected = await invoke(executable, ["trends", "inspect", "package", "--ecosystem", ecosystem, "--package", "requests", "--from", "2026-01-01", "--to", "2026-01-03", "--workspace", workspace, "--json"], consumer);
+      expectSuccess(packageInspected, "trends inspect");
+      expect(packageInspected.envelope).toMatchObject({ data: { observations: expect.any(Array), events: [expect.objectContaining({ kind: "momentum_up" })] } });
+      expect((packageInspected.envelope.data as { observations: unknown[] }).observations).toHaveLength(3);
+    }
+    const packagedMissing = await invoke(executable, ["trends", "collect", "pypi", "missing-package", "--from", "2026-01-01", "--to", "2026-01-03", "--fixture", "--fixture-failure", "missing_package", "--workspace", workspace, "--json"], consumer);
+    expect(packagedMissing.code).toBe(CLI_EXIT_CODES.missingResource);
+    expect(packagedMissing.envelope).toMatchObject({ errors: [{ code: "package_downloads.missing_package" }], data: { sourceHealth: [expect.objectContaining({ ecosystem: "pypi", status: "missing_package" })] } });
+    expectSuccess(await invoke(executable, ["export", "agents", "--workspace", workspace, "--json"], consumer), "export");
+    expectSuccess(await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer), "agent list");
+    const agent = await invoke(executable, ["agent", "create", "--kind", "research", "--intent", "inspect evidence", "--workspace", workspace, "--json"], consumer);
+    expectSuccess(agent, "agent create");
+    const taskId = (agent.envelope.data as { task: { id: string } }).task.id;
+    expectSuccess(await invoke(executable, ["agent", "run", taskId, "--workspace", workspace, "--json"], consumer), "agent run");
+
+    await expect(readFile(path.join(workspace, "state.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path.join(workspace, "state.json"), "not json", "utf8");
+    const restartedInspection = await invoke(executable, ["library", "inspect", opportunityId, "--run", runId, "--workspace", workspace, "--json"], consumer);
+    expect(restartedInspection.envelope).toMatchObject({
+      data: {
+        opportunity: { id: opportunityId, status: "promoted" },
+        calibrationEvents: [expect.objectContaining({ action: "promote" })],
+      },
+    });
+    const restartedValidations = await invoke(executable, ["validation", "list", "--opportunity", opportunityId, "--workspace", workspace, "--json"], consumer);
+    expect(restartedValidations.envelope).toMatchObject({ data: { experiments: [expect.objectContaining({ id: experimentId, status: "completed" })] } });
+    const restartedAgents = await invoke(executable, ["agent", "list", "--workspace", workspace, "--json"], consumer);
+    expect(restartedAgents.envelope).toMatchObject({ data: { tasks: [expect.objectContaining({ id: taskId, status: "succeeded" })] } });
+
+    const canonicalDb = new DatabaseSync(path.join(workspace, "pipeline", "idea_finder.db"));
+    for (const table of ["calibration_events", "validation_experiments", "monitor_schedules", "monitor_comparisons", "agent_tasks"]) {
+      const count = (canonicalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+      expect(count, table).toBeGreaterThan(0);
+    }
+    canonicalDb.close();
+  });
+
+  it("migrates legacy decision JSON through the installed CLI and restarts without it", async () => {
+    const legacyWorkspace = path.join(consumer, "legacy-decision-workspace");
+    const created = await invoke(executable, ["brief", "create", "legacy-cli", "--title", "Legacy CLI", "--workspace", legacyWorkspace, "--json"], consumer);
+    expect(created.code).toBe(0);
+    const briefId = (created.envelope.data as { brief: { id: string } }).brief.id;
+    const researched = await invoke(executable, ["run", "legacy-cli", "--fixture", "--workspace", legacyWorkspace, "--json"], consumer);
+    const stored = researched.envelope.data as {
+      run: { id: string };
+      opportunities: Array<Record<string, unknown> & { id: string }>;
+    };
+    const base = stored.opportunities[0]!;
+    const opportunity = {
+      ...base,
+      status: "promoted",
+      provenance: { ...(base.provenance as object), promotedBy: "user" },
+    };
+    const calibration = {
+      id: "cal_legacy_cli",
+      opportunityId: opportunity.id,
+      actor: "user",
+      action: "promote",
+      note: "installed CLI migration",
+      occurredAt: "2026-07-11T01:00:00.000Z",
+    };
+    const experiment = {
+      id: "vexp_legacy_cli",
+      opportunityId: opportunity.id,
+      type: "mom_test",
+      hypothesis: "legacy CLI hypothesis",
+      status: "completed",
+      result: { outcome: "validated", summary: "legacy CLI outcome", recordedAt: "2026-07-11T01:00:02.000Z", recordedBy: "user" },
+      artifacts: [],
+      createdAt: "2026-07-11T01:00:01.000Z",
+      updatedAt: "2026-07-11T01:00:02.000Z",
+    };
+    const schedule = {
+      id: `mon_${briefId}`,
+      briefId,
+      cadence: "weekly",
+      lastComparedRunId: stored.run.id,
+      enabled: true,
+      createdAt: "2026-07-11T01:00:03.000Z",
+    };
+    const task = {
+      id: "agent_legacy_cli",
+      kind: "research",
+      intent: "legacy installed task",
+      status: "succeeded",
+      opportunityId: opportunity.id,
+      evidenceIds: [],
+      dryRun: false,
+      plannedEffects: [],
+      createdAt: "2026-07-11T01:00:04.000Z",
+      updatedAt: "2026-07-11T01:00:04.000Z",
+      invocations: [],
+    };
+    const databasePath = path.join(legacyWorkspace, "pipeline", "idea_finder.db");
+    const db = new DatabaseSync(databasePath);
+    db.exec(`
+      DELETE FROM compatibility_migrations WHERE id = 'legacy-decision-json-v2';
+      DELETE FROM calibration_events;
+      DELETE FROM validation_experiments;
+      DELETE FROM monitor_schedules;
+      DELETE FROM agent_tasks;
+    `);
+    db.close();
+    await writeFile(path.join(legacyWorkspace, "state.json"), `${JSON.stringify({
+      ...emptyWorkspaceState(),
+      runs: [stored],
+      opportunities: { [opportunity.id]: opportunity },
+      calibrationEvents: [calibration],
+      validationExperiments: { [experiment.id]: experiment },
+      monitorSchedules: { [schedule.id]: schedule },
+      agentTasks: { [task.id]: task },
+    })}\n`, "utf8");
+
+    const migrated = await invoke(executable, ["library", "inspect", opportunity.id, "--run", stored.run.id, "--workspace", legacyWorkspace, "--json"], consumer);
+    expect(migrated.code).toBe(0);
+    expect(migrated.envelope).toMatchObject({ data: { opportunity: { status: "promoted" }, calibrationEvents: [{ id: calibration.id }] } });
+    await rm(path.join(legacyWorkspace, "state.json"));
+    expect((await invoke(executable, ["validation", "list", "--opportunity", opportunity.id, "--workspace", legacyWorkspace, "--json"], consumer)).envelope)
+      .toMatchObject({ data: { experiments: [{ id: experiment.id, status: "completed" }] } });
+    expect((await invoke(executable, ["agent", "list", "--workspace", legacyWorkspace, "--json"], consumer)).envelope)
+      .toMatchObject({ data: { tasks: [{ id: task.id, status: "succeeded" }] } });
+    const restartedDb = new DatabaseSync(databasePath);
+    expect((restartedDb.prepare("SELECT COUNT(*) AS count FROM compatibility_migrations WHERE id = 'legacy-decision-json-v2'").get() as { count: number }).count).toBe(1);
+    expect((restartedDb.prepare("SELECT COUNT(*) AS count FROM monitor_schedules WHERE id = ?").get(schedule.id) as { count: number }).count).toBe(1);
+    restartedDb.close();
+  });
+
+  it("runs and inspects a representative multi-lane research snapshot, then creates a follow-up Brief", async () => {
+    const multiWorkspace = path.join(consumer, "multi-lane-workspace");
+    const created = await invoke(executable, [
+      "brief", "create", "multi", "--title", "Multi lane", "--manual-import", "This agent coding workaround is painful every day.",
+      "--manual-import", "I would pay $20 monthly for a reliable agent workflow.",
+      "--google-subject", "agent coding", "--google-geo", "US", "--github-repo", "owner/repo",
+      "--npm-package", "agent-tool", "--pypi-package", "agent-tool", "--from", "2026-01-01", "--to", "2026-01-10",
+      "--workspace", multiWorkspace, "--json",
+    ], consumer);
+    expect(created.code).toBe(0);
+    const researched = await invoke(executable, ["research", "run", "multi", "--fixture-set", "representative", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(researched.code).toBe(0);
+    expect(researched.envelope).toMatchObject({ command: "research run", data: { summary: { schemaVersion: "1", lanes: { qualitative_demand: expect.any(Object), trend_momentum: expect.any(Object), supply_competition: expect.any(Object), commercial_intent: expect.any(Object), contradictory_evidence: expect.any(Object) } } } });
+    const candidates = (researched.envelope.data as { summary: { candidates: Array<{ admissionOutcome: string; id: string }> } }).summary.candidates;
+    expect(candidates).toHaveLength(4);
+    expect(candidates.every((item) => item.admissionOutcome === "rejected")).toBe(true);
+    const runId = (researched.envelope.data as { runId: string }).runId;
+    const inspected = await invoke(executable, ["research", "inspect", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(inspected.code).toBe(0);
+    expect(inspected.envelope).toMatchObject({ command: "research inspect", data: { runId, details: expect.any(Array), proposals: [expect.any(Object)] } });
+    const data = inspected.envelope.data as { details: unknown[]; proposals: Array<{ id: string; triggerEventId: string }> };
+    expect(data.details.length).toBeGreaterThan(0);
+    expect(data.details.every((detail: any) => detail.ref.kind === "text_quote" ? detail.evidence && detail.document : detail.ref.kind === "observation_series" ? detail.series && detail.observations.every(Boolean) : detail.observation || detail.ref.url)).toBe(true);
+    const rejected = await invoke(executable, ["library", "rejected", "--run", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(rejected.code).toBe(0);
+    expect((rejected.envelope.data as { results: unknown[] }).results.length).toBeGreaterThan(0);
+    const proposal = data.proposals[0]!;
+    const followed = await invoke(executable, ["research", "follow-up", runId, "--proposal", proposal.id, "--create", "multi-followup", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(followed.code).toBe(0);
+    expect(followed.envelope).toMatchObject({ data: { brief: { slug: "multi-followup", origin: { kind: "trend_anomaly", parentRunId: runId, trendEventId: proposal.triggerEventId } } } });
+    const afterFollowUp = await invoke(executable, ["research", "inspect", runId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(afterFollowUp.envelope).toMatchObject({ data: { proposals: [expect.objectContaining({ status: "created", createdBriefId: "task_multi-followup" })] } });
+
+    const partial = await invoke(executable, ["research", "run", "multi", "--fixture-set", "google-throttled", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(partial.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(partial.envelope).toMatchObject({ status: "partial", data: { runId: expect.any(String), sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "throttled" }), expect.objectContaining({ source: "github", status: "success" })]) }, incompleteness: { incomplete: true, reasons: [expect.stringContaining("google_trends")] } });
+    const partialRunId = (partial.envelope.data as { runId: string }).runId;
+    const partialInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(partialInspect.code).toBe(CLI_EXIT_CODES.partialResult);
+    const retainedClaimIds = (partialInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id);
+    expect(retainedClaimIds.length).toBeGreaterThan(0);
+    const recovered = await invoke(executable, ["research", "run", "multi", "--fixture-set", "representative", "--retry", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(recovered.code).toBe(0);
+    expect(recovered.envelope).toMatchObject({ data: { runId: partialRunId, execution: "retried", sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "success" })]) } });
+    const recoveredInspect = await invoke(executable, ["research", "inspect", partialRunId, "--workspace", multiWorkspace, "--json"], consumer);
+    expect(recoveredInspect.code).toBe(0);
+    expect((recoveredInspect.envelope.data as { claims: Array<{ id: string }> }).claims.map((claim) => claim.id)).toEqual(expect.arrayContaining(retainedClaimIds));
+    expect((await invoke(executable, ["monitor", "schedule", "multi", "--cadence", "daily", "--workspace", multiWorkspace, "--json"], consumer)).code).toBe(0);
+    const quantitativeMonitor = await invoke(executable, ["monitor", "run", "multi", "--fixture", "--workspace", multiWorkspace, "--json"], consumer);
+    expect(quantitativeMonitor.code, JSON.stringify(quantitativeMonitor.envelope)).toBe(0);
+    expect(quantitativeMonitor.envelope).toMatchObject({ data: { comparison: null, sourceStatuses: expect.arrayContaining([expect.objectContaining({ source: "google_trends", status: "success" }), expect.objectContaining({ source: "github", status: "success" }), expect.objectContaining({ source: "npm", status: "success" })]) } });
+  });
+
+  it("separates new scans from named retry/resume and isolates fixtures", async () => {
+    const created = await invoke(executable, ["brief", "create", "lifecycle", "--title", "Lifecycle", "--description", "No evidence supplied", "--workspace", workspace, "--json"], consumer);
+    expect(created.code).toBe(0);
+
+    const first = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    const second = await invoke(executable, ["run", "lifecycle", "--workspace", workspace, "--json"], consumer);
+    expect(first.code).toBe(0);
+    expect(second.code).toBe(0);
+    const firstData = first.envelope.data as { execution: string; run: { id: string; status: string; configHash: string }; chunks: unknown[]; evidence: unknown[] };
+    const secondData = second.envelope.data as typeof firstData;
+    expect(firstData.execution).toBe("new");
+    expect(secondData.execution).toBe("new");
+    expect(firstData.run.status).toBe("completed");
+    expect(secondData.run.status).toBe("completed");
+    expect(firstData.run.id).not.toBe(secondData.run.id);
+    expect(firstData.run.configHash).toBe(secondData.run.configHash);
+    expect(firstData.chunks).toEqual([]);
+    expect(firstData.evidence).toEqual([]);
+
+    const databasePath = path.join(workspace, "pipeline", "idea_finder.db");
+    const interruptedDb = new DatabaseSync(databasePath);
+    const firstHarvestAt = (interruptedDb.prepare("SELECT completed_at FROM pipeline_steps WHERE research_run_id = ? AND step = 'harvest'").get(firstData.run.id) as { completed_at: string }).completed_at;
+    interruptedDb.prepare("UPDATE research_runs SET status = 'running', completed_at = NULL WHERE id = ?").run(firstData.run.id);
+    interruptedDb.prepare("DELETE FROM pipeline_steps WHERE research_run_id = ? AND step IN ('intelligence', 'library_admission')").run(firstData.run.id);
+    interruptedDb.close();
+
+    const resumed = await invoke(executable, ["run", "lifecycle", "--resume", firstData.run.id, "--workspace", workspace, "--json"], consumer);
+    const failedDb = new DatabaseSync(databasePath);
+    const resumedSteps = failedDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(firstData.run.id) as Array<{ step: string; completed_at: string }>;
+    expect(resumedSteps).toHaveLength(3);
+    expect(resumedSteps.find((step) => step.step === "harvest")?.completed_at).toBe(firstHarvestAt);
+
+    const secondCompletedSteps = failedDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(secondData.run.id) as Array<{ step: string; completed_at: string }>;
+    failedDb.prepare("UPDATE research_runs SET status = 'failed', completed_at = NULL, error_message = 'interrupted after intelligence' WHERE id = ?").run(secondData.run.id);
+    failedDb.prepare("DELETE FROM pipeline_steps WHERE research_run_id = ? AND step = 'library_admission'").run(secondData.run.id);
+    failedDb.close();
+
+    const retried = await invoke(executable, ["run", "lifecycle", "--retry", secondData.run.id, "--workspace", workspace, "--json"], consumer);
+    const recoveredDb = new DatabaseSync(databasePath);
+    const retriedSteps = recoveredDb.prepare("SELECT step, completed_at FROM pipeline_steps WHERE research_run_id = ? ORDER BY step").all(secondData.run.id) as Array<{ step: string; completed_at: string }>;
+    recoveredDb.close();
+    expect(retriedSteps).toHaveLength(3);
+    for (const completed of secondCompletedSteps.filter((step) => step.step !== "library_admission")) {
+      expect(retriedSteps.find((step) => step.step === completed.step)?.completed_at).toBe(completed.completed_at);
+    }
+    expect(resumed.code).toBe(0);
+    expect(retried.code).toBe(0);
+    expect(resumed.envelope).toMatchObject({ data: { execution: "resumed", run: { id: firstData.run.id, status: "completed" } } });
+    expect(retried.envelope).toMatchObject({ data: { execution: "retried", run: { id: secondData.run.id, status: "completed" } } });
+
+    const explicitBrief = await invoke(executable, [
+      "brief", "create", "explicit-import", "--title", "Explicit import",
+      "--manual-import", "Explicit interview: this workflow is painful and I would pay to replace it.",
+      "--workspace", workspace, "--json",
+    ], consumer);
+    expect(explicitBrief.code).toBe(0);
+    const explicitImport = await invoke(executable, ["run", "explicit-import", "--workspace", workspace, "--json"], consumer);
+    expect(explicitImport.code).toBe(0);
+    const explicitData = explicitImport.envelope.data as typeof firstData;
+    expect(explicitData.chunks).toHaveLength(1);
+    expect(explicitData.run.configHash).not.toBe(firstData.run.configHash);
+
+    const fixture = await invoke(executable, ["run", "lifecycle", "--fixture", "--workspace", workspace, "--json"], consumer);
+    expect(fixture.code).toBe(0);
+    const fixtureData = fixture.envelope.data as { execution: string; run: { id: string }; evidence: unknown[] };
+    expect(fixtureData.execution).toBe("new");
+    expect(fixtureData.run.id).not.toBe(firstData.run.id);
+    expect(fixtureData.evidence.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces mixed, authorization, throttling, zero results, retry, and recovery through the installed CLI", async () => {
+    expect((await invoke(executable, ["brief", "create", "source-outcomes", "--title", "Source outcomes", "--workspace", workspace, "--json"], consumer)).code).toBe(0);
+    const runScenario = (scenario: string, json = true) => invoke(executable, ["run", "source-outcomes", "--fixture", "--fixture-source-outcome", scenario, "--workspace", workspace, ...(json ? ["--json"] : [])], consumer);
+    for (const scenario of ["mixed", "unauthorized", "throttled"] as const) {
+      const result = await runScenario(scenario);
+      expect(result.code).toBe(CLI_EXIT_CODES.partialResult);
+      expect(result.envelope).toMatchObject({
+        status: "partial",
+        data: { run: { status: "partial" }, evidence: expect.any(Array), sourceStatuses: [expect.objectContaining({ status: "success" }), expect.objectContaining({ status: scenario === "mixed" ? "unavailable" : scenario })] },
+        incompleteness: { incomplete: true, reasons: [expect.stringContaining(scenario === "mixed" ? "unavailable" : scenario)] },
+      });
+    }
+    const zero = await runScenario("zero");
+    expect(zero.code).toBe(0);
+    expect(zero.envelope).toMatchObject({ status: "success", data: { run: { status: "completed" }, evidence: [], sourceStatuses: expect.arrayContaining([expect.objectContaining({ status: "success", itemCount: 0, reasonCode: "zero_results" })]) } });
+
+    const throttled = await runScenario("throttled");
+    const partialData = throttled.envelope.data as { run: { id: string }; evidence: Array<{ id: string }>; sourceStatuses: Array<{ status: string; retryAt: string | null }> };
+    expect(partialData.sourceStatuses.find((item) => item.status === "throttled")?.retryAt).toBe("2026-07-11T00:01:00.000Z");
+    const recovered = await invoke(executable, ["run", "source-outcomes", "--fixture", "--retry", partialData.run.id, "--workspace", workspace, "--json"], consumer);
+    expect(recovered.code).toBe(0);
+    const recoveredData = recovered.envelope.data as { execution: string; run: { id: string; status: string }; evidence: Array<{ id: string }>; sourceStatuses: Array<{ status: string }> };
+    expect(recoveredData).toMatchObject({ execution: "retried", run: { id: partialData.run.id, status: "completed" } });
+    expect(recoveredData.sourceStatuses.every((item) => item.status === "success")).toBe(true);
+    expect(recoveredData.evidence.map((item) => item.id)).toEqual(partialData.evidence.map((item) => item.id));
+
+    const human = await invokeHuman(executable, ["run", "source-outcomes", "--fixture", "--fixture-source-outcome", "unauthorized", "--workspace", workspace], consumer);
+    expect(human.code).toBe(CLI_EXIT_CODES.partialResult);
+    expect(human.stdout).toContain("incomplete sources: fixture_recoverable=unauthorized");
+    expect(human.stdout).toContain("conclusions remain conditional");
+  });
+
+  it("restarts from canonical SQLite and inspects admitted and rejected Library results", async () => {
+    const created = await invoke(executable, [
+      "brief", "create", "canonical", "--title", "Canonical research",
+      "--description", "Explicit research persisted in SQLite",
+      "--manual-import", "I invoice from a Google Sheet every month — painful workaround reconciling Stripe payouts.",
+      "--manual-import", "Would pay $30/mo for lightweight solo SaaS invoicing with Stripe sync.",
+      "--manual-import", "Need something simpler than QuickBooks for month-end invoicing.",
+      "--manual-import", "QuickBooks works fine for enterprise — not a problem for us.",
+      "--workspace", workspace, "--json",
+    ], consumer);
+    expect(created.code).toBe(0);
+    const researched = await invoke(executable, ["run", "canonical", "--workspace", workspace, "--json"], consumer);
+    expect(researched.code).toBe(0);
+    const result = researched.envelope.data as {
+      run: { id: string };
+      documents: unknown[];
+      admittedCount: number;
+      rejected: unknown[];
+      opportunities: Array<{ id: string }>;
+    };
+    expect(result.documents).toHaveLength(4);
+    expect(result.admittedCount).toBeGreaterThan(0);
+    expect(result.rejected.length).toBeGreaterThan(0);
+
+    await writeFile(path.join(workspace, "state.json"), JSON.stringify({ version: 1, opportunities: { poisoned: true } }), "utf8");
+    const listedBriefs = await invoke(executable, ["brief", "list", "--workspace", workspace, "--json"], consumer);
+    expect(listedBriefs.envelope).toMatchObject({ data: { briefs: expect.arrayContaining([expect.objectContaining({ slug: "canonical" })]) } });
+    const library = await invoke(executable, ["library", "--brief", "canonical", "--workspace", workspace, "--json"], consumer);
+    const libraryData = library.envelope.data as {
+      opportunities: Array<{ id: string }>;
+      entries: Array<{ runId: string; opportunity: { id: string } }>;
+    };
+    const opportunities = libraryData.opportunities;
+    expect(opportunities.length).toBeGreaterThan(0);
+    const listedOccurrence = libraryData.entries.find((entry) => entry.opportunity.id === opportunities[0]!.id)!;
+    expect(listedOccurrence.runId).toBe(result.run.id);
+    const inspected = await invoke(executable, ["library", "inspect", opportunities[0]!.id, "--run", listedOccurrence.runId, "--workspace", workspace, "--json"], consumer);
+    expect(inspected.envelope).toMatchObject({ command: "library inspect", data: { opportunity: { id: opportunities[0]!.id }, runId: result.run.id } });
+    const rejected = await invoke(executable, ["library", "rejected", "--run", result.run.id, "--workspace", workspace, "--json"], consumer);
+    expect((rejected.envelope.data as { results: unknown[] }).results.length).toBeGreaterThan(0);
+
+    const db = new DatabaseSync(path.join(workspace, "pipeline", "idea_finder.db"));
+    for (const table of ["hunting_briefs", "research_run_configs", "raw_documents", "chunks", "raw_signals", "evidence_items", "opportunity_drafts", "library_admission_results", "source_statuses"]) {
+      const count = (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+      expect(count, table).toBeGreaterThan(0);
+    }
+    db.close();
+  });
+
+  it("pins usage, validation, missing-resource, policy, and internal error exits", async () => {
+    expect(CLI_EXIT_CODES).toEqual({ success: 0, usage: 2, validation: 3, missingResource: 4, policy: 5, partialResult: 6, internal: 7 });
+    const usage = await invoke(executable, ["unknown", "command", "--json"], consumer);
+    expect(usage.code).toBe(CLI_EXIT_CODES.usage);
+    expect(usage.envelope.errors[0]).toMatchObject({ category: "usage", code: "cli.unknown_command" });
+
+    const unknownOption = await invoke(executable, ["brief", "list", "--bogus", "--json"], consumer);
+    expect(unknownOption.code).toBe(CLI_EXIT_CODES.usage);
+    expect(unknownOption.envelope.errors[0]).toMatchObject({ category: "usage", code: "cli.unknown_option" });
+
+    const validation = await invoke(executable, ["monitor", "schedule", "agents", "--cadence", "hourly", "--workspace", workspace, "--json"], consumer);
+    expect(validation.code).toBe(CLI_EXIT_CODES.validation);
+    expect(validation.envelope.errors[0]).toMatchObject({ category: "validation", code: "cli.invalid_value" });
+
+    const missing = await invoke(executable, ["export", "absent", "--workspace", workspace, "--json"], consumer);
+    expect(missing.code).toBe(CLI_EXIT_CODES.missingResource);
+    expect(missing.envelope.errors[0]).toMatchObject({ category: "missing-resource", code: "brief.not_found" });
+
+    const created = await invoke(executable, ["agent", "create", "--kind", "browser", "--intent", "write opportunity", "--opportunity", "opp_x", "--domain-write", "--workspace", workspace, "--json"], consumer);
+    const taskId = (created.envelope.data as { task: { id: string } }).task.id;
+    const policy = await invoke(executable, ["agent", "run", taskId, "--workspace", workspace, "--json"], consumer);
+    expect(policy.code).toBe(CLI_EXIT_CODES.policy);
+    expect(policy.envelope.errors[0]).toMatchObject({ category: "policy", code: "policy.domain_write_forbidden" });
+
+    await writeFile(path.join(workspace, "state.json"), "not json", "utf8");
+    const ignoredJson = await invoke(executable, ["workspace", "diagnostics", "--workspace", workspace, "--json"], consumer);
+    expect(ignoredJson.code).toBe(0);
+
+    const brokenWorkspace = path.join(consumer, "broken-sqlite");
+    await mkdir(path.join(brokenWorkspace, "pipeline"), { recursive: true });
+    await writeFile(path.join(brokenWorkspace, "pipeline", "idea_finder.db"), "not sqlite", "utf8");
+    const internal = await invoke(executable, ["workspace", "diagnostics", "--workspace", brokenWorkspace, "--json"], consumer);
+    expect(internal.code).toBe(CLI_EXIT_CODES.internal);
+    expect(internal.envelope.errors[0]).toMatchObject({ category: "internal", code: "internal.unexpected" });
+  });
+
+  it("pins partial-result as structured incompleteness with exit 6", () => {
+    const partial = createMachineEnvelope("agent run", {
+      command: "agent run",
+      data: { retained: true },
+      human: "partial",
+      incompleteness: ["one source unavailable"],
+      exitCode: CLI_EXIT_CODES.partialResult,
+    });
+    expect(partial).toMatchObject({
+      status: "partial",
+      data: { retained: true },
+      incompleteness: { incomplete: true, reasons: ["one source unavailable"] },
+      errors: [{ category: "partial-result", code: "result.partial" }],
+    });
+  });
+
+  it("keeps human presentation outside the pinned machine envelope", async () => {
+    const cleanWorkspace = path.join(consumer, "human-workspace");
+    const human = await exec(executable, ["brief", "list", "--workspace", cleanWorkspace], { cwd: consumer });
+    expect(human.stdout.trim()).toBe("No briefs yet.");
+    expect(() => JSON.parse(human.stdout)).toThrow();
+
+    const machine = await invoke(executable, ["brief", "list", "--workspace", cleanWorkspace, "--json"], consumer);
+    expect(machine.envelope.data).toEqual({ briefs: [] });
+  });
+
+  it("ships the bundled executable and companion Skill required at runtime", async () => {
+    const installedPackage = JSON.parse(await readFile(path.join(consumer, "node_modules", "idea-finder", "package.json"), "utf8")) as { bin: Record<string, string>; dependencies?: object };
+    expect(installedPackage.bin).toEqual({ "idea-finder": "./bin/idea-finder.js" });
+    expect(installedPackage.dependencies).toBeUndefined();
+    const installedSkill = await readFile(path.join(consumer, "node_modules", "idea-finder", "skills", "idea-finder", "SKILL.md"), "utf8");
+    expect(installedSkill).toContain("name: idea-finder");
+    expect(installedSkill).not.toContain("TODO");
+    const unrelatedCwd = await mkdtemp(path.join(os.tmpdir(), "idea-finder-path-"));
+    try {
+      const bare = await exec("idea-finder", ["workspace", "diagnostics", "--workspace", path.join(unrelatedCwd, "workspace"), "--json"], { cwd: unrelatedCwd, env: { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` } });
+      expect((JSON.parse(bare.stdout) as CliMachineEnvelope).status).toBe("success");
+    } finally { await rm(unrelatedCwd, { recursive: true, force: true }); }
+  });
+});
