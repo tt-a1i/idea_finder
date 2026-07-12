@@ -10,6 +10,6 @@ describe("@idea-finder/connectors", () => {
 
   it("exports L0 default connector pack", () => {
     const pack = createL0ConnectorPack();
-    expect(pack.length).toBe(5);
+    expect(pack.length).toBe(6);
   });
 });

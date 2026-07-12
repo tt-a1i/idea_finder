@@ -36,12 +36,17 @@ interface Invocation {
   readonly envelope: CliMachineEnvelope;
 }
 
-async function invoke(args: readonly string[], workspace: string): Promise<Invocation> {
+async function invoke(
+  args: readonly string[],
+  workspace: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Invocation> {
   const commandArgs = [...args, "--workspace", workspace, "--json"];
   try {
     const result = await exec(process.execPath, [executable, ...commandArgs], {
       cwd: repositoryRoot,
       maxBuffer: 16 * 1024 * 1024,
+      env,
     });
     return { exitCode: 0, envelope: JSON.parse(result.stdout) as CliMachineEnvelope };
   } catch (error) {
@@ -86,8 +91,9 @@ async function execute(
   args: readonly string[],
   workspace: string,
   trace: SkillWorkflowCommand[],
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<CliMachineEnvelope> {
-  const result = await invoke(args, workspace);
+  const result = await invoke(args, workspace, env);
   trace.push({
     command: commandName(result.envelope),
     args: [...args],
@@ -218,10 +224,11 @@ export async function runSkillWorkflow(input: WorkflowInput): Promise<SkillWorkf
 
       if (sourcesUnavailable) {
         // Confirmed but no public sources available — still run the empty brief path without inventing imports.
-        const run = await execute(["research", "run", briefSlug], workspace, commands);
+        const offlineEnv = { ...process.env, IDEA_FINDER_FORCE_UNAVAILABLE: "1" };
+        const run = await execute(["research", "run", briefSlug], workspace, commands, offlineEnv);
         const runId = findString(run.data, "runId");
         if (!runId) throw new Error("Research command did not return a runId");
-        const inspected = await execute(["research", "inspect", runId], workspace, commands);
+        const inspected = await execute(["research", "inspect", runId], workspace, commands, offlineEnv);
         const evidenceCount = Array.isArray((inspected.data as { details?: unknown[] }).details)
           ? (inspected.data as { details: unknown[] }).details.length
           : 0;
@@ -232,15 +239,15 @@ export async function runSkillWorkflow(input: WorkflowInput): Promise<SkillWorkf
         };
       }
 
-      // Confirmed broad research: brief from confirm already has sources from plan defaults.
-      // Deterministic Skill eval uses representative fixtures so live network cannot break the JSON contract.
-      const run = await execute(["research", "run", briefSlug, "--fixture-set", "representative"], workspace, commands);
+      // Confirmed broad research: keep deterministic eval offline (no --fixture flags; Skill forbids them for live asks).
+      const offlineEnv = { ...process.env, IDEA_FINDER_FORCE_UNAVAILABLE: "1" };
+      const run = await execute(["research", "run", briefSlug], workspace, commands, offlineEnv);
       const runId = findString(run.data, "runId");
       if (!runId) throw new Error("Research command did not return a runId");
       let evidenceCount = 0;
       let incomplete = run.exitCode === 6;
       try {
-        const inspected = await execute(["research", "inspect", runId], workspace, commands);
+        const inspected = await execute(["research", "inspect", runId], workspace, commands, offlineEnv);
         evidenceCount = Array.isArray((inspected.data as { details?: unknown[] }).details)
           ? (inspected.data as { details: unknown[] }).details.length
           : 0;

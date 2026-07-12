@@ -49,4 +49,31 @@ describe("broad query variants", () => {
     expect(plan.searches.map((search) => search.queryText)).toEqual(["agent coding", "workaround"]);
     expect(plan.searches.every((search) => search.terms.length === 1)).toBe(true);
   });
+
+  it("manual harvest mode keeps SearchPlan network queries out of the QueryPlan", () => {
+    const brief: HuntingBrief = {
+      id: asId("task_manual_only"),
+      slug: "manual-only",
+      title: "Manual only",
+      description: "imports only",
+      lenses: ["pain"],
+      sourcesEnabled: ["manual"],
+      successCriteria: "s",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      searchPlanId: "plan_test",
+      searchPlanVersion: 1,
+      queryPlan: {
+        harvestMode: "manual",
+        manualImports: [{ text: "Standup notes get lost between coding agents every Monday." }],
+      },
+    };
+    const plan = buildQueryPlanFromBrief(brief, brief.id, [
+      { id: "q1", queryText: "agent handoff pain", source: "hn" },
+      { id: "q2", queryText: "standup workaround", source: "v2ex" },
+    ]);
+    expect(plan.searches).toEqual([]);
+    expect(plan.manualImports).toEqual([
+      { text: "Standup notes get lost between coding agents every Monday." },
+    ]);
+  });
 });

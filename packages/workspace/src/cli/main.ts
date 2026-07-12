@@ -789,8 +789,13 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
       const plan = await service.getSearchPlan(brief.searchPlanId);
       const run = state.runs.find((item) => item.run.id === runId);
       if (plan && run) {
-        const independenceRecords = (service.inspectMultiLaneResearch(runId as never).independence ?? []) as Array<{ documentId: string; independenceGroupId: string }>;
-        const independence = new Map(independenceRecords.map((item) => [item.documentId, item.independenceGroupId]));
+        let independence = new Map<string, string>();
+        try {
+          const independenceRecords = (service.inspectMultiLaneResearch(runId as never).independence ?? []) as Array<{ documentId: string; independenceGroupId: string }>;
+          independence = new Map(independenceRecords.map((item) => [item.documentId, item.independenceGroupId]));
+        } catch {
+          // Fixture / qualitative-only runs may not have a multi-lane report yet.
+        }
         const clusters = clusterPainSignals({
           signals: run.signals,
           independenceGroupByDocumentId: independence,

@@ -11,12 +11,16 @@ export interface RateLimitedFetcher {
 /** Shared rate-limited fetch wrapper for L0 API connectors. */
 export function createRateLimitedFetcher(options: FetchOptions = {}): RateLimitedFetcher {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
-  const minIntervalMs = options.minIntervalMs ?? 250;
+  const forcedUnavailable = process.env.IDEA_FINDER_FORCE_UNAVAILABLE === "1";
+  const minIntervalMs = forcedUnavailable ? 0 : (options.minIntervalMs ?? 250);
   const userAgent = options.userAgent ?? "idea-finder/0.1 (+https://github.com/idea-finder)";
   let lastFetchAt = 0;
 
   return {
     async fetch(url, init) {
+      if (forcedUnavailable) {
+        throw new Error("network unavailable (IDEA_FINDER_FORCE_UNAVAILABLE=1)");
+      }
       const now = Date.now();
       const waitMs = Math.max(0, minIntervalMs - (now - lastFetchAt));
       if (waitMs > 0) {

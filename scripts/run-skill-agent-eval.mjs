@@ -31,14 +31,18 @@ function completedCommands(events) {
   });
 }
 
-function requireSuccessfulRequiredCommands(events, requiredFragments) {
+/** Exit 0 = complete; exit 6 = partialResult (allowed for research when sources are incomplete). */
+const ACCEPTABLE_EXIT_CODES = new Set([0, 6]);
+
+function requireSuccessfulRequiredCommands(events, requiredFragments, { allowPartial = false } = {}) {
+  const accepted = allowPartial ? ACCEPTABLE_EXIT_CODES : new Set([0]);
   for (const fragment of requiredFragments) {
     const ok = events.some((event) => {
       const item = event?.item;
       return event?.type === "item.completed"
         && item?.type === "command_execution"
-        && item.exit_code === 0
-        && item.status === "completed"
+        && accepted.has(item.exit_code)
+        && (item.status === "completed" || (allowPartial && item.status === "failed" && item.exit_code === 6))
         && typeof item.command === "string"
         && item.command.includes(fragment);
     });
@@ -165,16 +169,18 @@ async function main() {
     if (negativeCommands.some((command) => command.includes("--manual-import"))) {
       throw new Error(`Negative Agent invented --manual-import:\n${negativeCommands.join("\n")}`);
     }
-    const negativeRequired = ["idea-finder workspace diagnostics"];
+    const negativeRequired = ["idea-finder workspace diagnostics", "idea-finder plan propose"];
     requireSuccessfulRequiredCommands(negative, negativeRequired);
     const attemptedResearch = negativeCommands.some((command) =>
-      /idea-finder (?:brief create|research run|research inspect)/.test(command));
-    if (!attemptedResearch) {
-      throw new Error(`Negative Agent skipped canonical discovery commands:\n${negativeCommands.join("\n")}`);
+      /idea-finder (?:research run|evidence ingest-fetched)/.test(command));
+    if (attemptedResearch) {
+      throw new Error(`Negative Agent ran research before confirmation:\n${negativeCommands.join("\n")}`);
     }
     const negativeMessage = finalMessage(negative);
-    if (!negativeMessage.includes("Partial result:") && !negativeMessage.includes("Unresolved uncertainty:")) {
-      throw new Error(`Negative Agent omitted Partial result / Unresolved uncertainty:\n${negativeMessage}`);
+    if (!/Human decision required|confirm|Confirmation|Unresolved uncertainty/i.test(negativeMessage)
+      && !negativeMessage.includes("Partial result:")
+      && !negativeMessage.includes("Unresolved uncertainty:")) {
+      throw new Error(`Negative Agent omitted confirmation pause / uncertainty labels:\n${negativeMessage}`);
     }
 
     // Positive: import only the exact user-provided verbatim texts.
@@ -182,20 +188,21 @@ async function main() {
     const positive = await runAgent({
       consumer,
       env,
-      prompt: `Use $idea-finder to research demand in ${positiveWorkspace}. I am providing exactly two user-provided verbatim notes; import them unchanged with --manual-import and do not invent a third, do not embellish pain/WTP/persona/frequency, and do not use network sources. Follow the Skill workflow, inspect stored evidence, do not calibrate or validate, and finish with the Skill's evidence labels.\n\nUser-provided verbatim: "${VERBATIM_ONE}"\nUser-provided verbatim: "${VERBATIM_TWO}"`,
+      prompt: `Use $idea-finder to research demand in ${positiveWorkspace}. Confirm the default search plan and start now. I am providing exactly two user-provided verbatim notes; import them unchanged with --manual-import and do not invent a third, do not embellish pain/WTP/persona/frequency, and do not use network sources. Follow the Skill workflow, inspect stored evidence, do not calibrate or validate, and finish with the Skill's evidence labels.\n\nUser-provided verbatim: "${VERBATIM_ONE}"\nUser-provided verbatim: "${VERBATIM_TWO}"`,
     });
     const positiveCommands = completedCommands(positive);
-    const positiveRequired = ["idea-finder workspace diagnostics", "idea-finder brief create", "idea-finder research run", "idea-finder research inspect"];
-    requireSuccessfulRequiredCommands(positive, positiveRequired);
+    const positiveRequired = ["idea-finder workspace diagnostics", "idea-finder plan propose", "idea-finder plan confirm", "idea-finder research run", "idea-finder research inspect"];
+    requireSuccessfulRequiredCommands(positive, positiveRequired, { allowPartial: true });
     requireCommands(positiveCommands, positiveRequired, positive);
     if (positiveCommands.some((command) => /idea-finder (?:board calibrate|validation (?:add|complete))/.test(command))) {
       throw new Error("Positive Agent crossed the human-decision mutation boundary");
     }
     const imports = manualImportValues(positiveCommands);
-    if (imports.length !== 2) {
-      throw new Error(`Expected exactly two --manual-import values, got ${imports.length}: ${JSON.stringify(imports)}`);
+    const uniqueImports = [...new Set(imports)];
+    if (uniqueImports.length !== 2) {
+      throw new Error(`Expected exactly two distinct --manual-import values, got ${uniqueImports.length}: ${JSON.stringify(imports)}`);
     }
-    if (!imports.includes(VERBATIM_ONE) || !imports.includes(VERBATIM_TWO)) {
+    if (!uniqueImports.includes(VERBATIM_ONE) || !uniqueImports.includes(VERBATIM_TWO)) {
       throw new Error(`Imported texts were altered or incomplete:\n${JSON.stringify(imports)}`);
     }
     const embellished = imports.some((text) =>

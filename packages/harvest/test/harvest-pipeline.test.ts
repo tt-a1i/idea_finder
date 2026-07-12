@@ -135,7 +135,7 @@ describe("harvest pipeline", () => {
   it("createL0ConnectorPack registers all default platforms", () => {
     const pack = createL0ConnectorPack({ fetch: { fetchFn: mockFetch() } });
     expect(pack.map((c) => c.platform).sort()).toEqual(
-      ["app_store", "hn", "manual", "stack_exchange", "v2ex"].sort(),
+      ["app_store", "github_issues", "hn", "manual", "stack_exchange", "v2ex"].sort(),
     );
   });
 });

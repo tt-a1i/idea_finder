@@ -14,10 +14,19 @@ export function buildQueryPlanFromBrief(
   searchPlanQueries?: readonly { readonly id: string; readonly queryText: string; readonly source: string }[],
 ): QueryPlan {
   if (searchPlanQueries && searchPlanQueries.length > 0) {
+    // Manual-only briefs may still reference a confirmed SearchPlan for auditability,
+    // but must not enqueue network searches without L0 connectors.
+    if (resolveHarvestMode(brief) === "manual") {
+      return {
+        huntingTaskId,
+        searches: [],
+        manualImports: brief.queryPlan?.manualImports,
+      };
+    }
     return {
       huntingTaskId,
       searches: searchPlanQueries
-        .filter((query) => ["hn", "v2ex", "app_store", "stack_exchange"].includes(query.source))
+        .filter((query) => ["hn", "v2ex", "app_store", "stack_exchange", "github_issues"].includes(query.source))
         .map((query) => ({
           platform: query.source,
           terms: [query.queryText],
