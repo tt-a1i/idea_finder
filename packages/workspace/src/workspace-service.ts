@@ -76,6 +76,8 @@ import type {
   AgentTask,
   HuntingBrief,
   InboxSignalSummary,
+  ResearchLens,
+  SearchPlan,
   StoredResearchRun,
   LibraryAdmissionRecord,
   ResearchSourceStatus,
@@ -83,6 +85,7 @@ import type {
   WorkspaceState,
 } from "./types.js";
 import { emptyWorkspaceState } from "./types.js";
+import { buildProposedSearchPlan, confirmSearchPlanEntity, slugFromTopic } from "./orchestration/search-plan.js";
 import type { AgentKind, AgentPlannedEffect } from "@idea-finder/agents";
 
 export interface WorkspaceServiceOptions {
@@ -471,7 +474,28 @@ export class WorkspaceService {
     successCriteria?: string;
     queryPlan?: HuntingBrief["queryPlan"];
     origin?: HuntingBrief["origin"];
+    searchPlanId?: string;
+    searchPlanVersion?: number;
+    attachConfirmedPlan?: boolean;
   }): Promise<HuntingBrief> {
+    let searchPlanId = input.searchPlanId;
+    let searchPlanVersion = input.searchPlanVersion;
+    if (!searchPlanId && input.attachConfirmedPlan !== false) {
+      const proposed = buildProposedSearchPlan({ topic: input.title || input.slug });
+      const confirmed = confirmSearchPlanEntity(proposed, {
+        mode: "start_now",
+        briefId: `task_${input.slug}`,
+        briefSlug: input.slug,
+      });
+      const storageForPlan = this.openCanonical();
+      try {
+        storageForPlan.searchPlans.save(confirmed as { readonly id: string });
+      } finally {
+        storageForPlan.close();
+      }
+      searchPlanId = confirmed.id;
+      searchPlanVersion = confirmed.version;
+    }
     const brief: HuntingBrief = {
       id: asId<HuntingTaskId>(`task_${input.slug}`),
       slug: input.slug,
@@ -483,6 +507,8 @@ export class WorkspaceService {
       createdAt: new Date().toISOString(),
       queryPlan: input.queryPlan,
       origin: input.origin,
+      searchPlanId,
+      searchPlanVersion,
     };
     await this.migrateLegacyBriefs();
     const storage = this.openCanonical();
@@ -492,6 +518,17 @@ export class WorkspaceService {
       );
       if (conflict) throw new Error(`Brief already exists: ${input.slug}`);
       storage.huntingBriefs.save(brief);
+      if (searchPlanId) {
+        const plan = storage.searchPlans.get(searchPlanId) as SearchPlan | null;
+        if (plan) {
+          storage.searchPlans.save({
+            ...plan,
+            briefId: brief.id,
+            briefSlug: brief.slug,
+            updatedAt: new Date().toISOString(),
+          } as { readonly id: string });
+        }
+      }
     } finally {
       storage.close();
     }
@@ -513,6 +550,127 @@ export class WorkspaceService {
     return briefs.find((brief) => brief.slug === slugOrId || brief.id === slugOrId) ?? null;
   }
 
+  async proposeSearchPlan(input: {
+    readonly topic: string;
+    readonly personas?: readonly string[];
+    readonly scenarios?: readonly string[];
+    readonly languages?: readonly string[];
+    readonly geography?: string;
+    readonly timeWindow?: { readonly from: string; readonly to: string };
+    readonly sourceFamilies?: readonly string[];
+    readonly researchLenses?: readonly ResearchLens[];
+    readonly budgets?: { readonly queries?: number; readonly documents?: number; readonly rounds?: number };
+  }): Promise<SearchPlan> {
+    const plan = buildProposedSearchPlan(input);
+    const storage = this.openCanonical();
+    try {
+      storage.searchPlans.save(plan as { readonly id: string });
+    } finally {
+      storage.close();
+    }
+    return plan;
+  }
+
+  async getSearchPlan(planId: string): Promise<SearchPlan | null> {
+    const storage = this.openCanonical();
+    try {
+      return storage.searchPlans.get(planId) as SearchPlan | null;
+    } finally {
+      storage.close();
+    }
+  }
+
+  async confirmSearchPlan(input: {
+    readonly planId: string;
+    readonly mode?: "explicit" | "start_now";
+    readonly slug?: string;
+    readonly createBrief?: boolean;
+  }): Promise<{ readonly plan: SearchPlan; readonly brief: HuntingBrief | null }> {
+    const storage = this.openCanonical();
+    try {
+      const existing = storage.searchPlans.get(input.planId) as SearchPlan | null;
+      if (!existing) throw new Error(`Search plan not found: ${input.planId}`);
+
+      let brief: HuntingBrief | null = null;
+      const shouldCreateBrief = input.createBrief !== false;
+      if (shouldCreateBrief) {
+        const slug = input.slug?.trim() || existing.briefSlug || slugFromTopic(existing.topic);
+        const existingBrief = (storage.huntingBriefs.list() as HuntingBrief[]).find(
+          (item) => item.slug === slug || item.id === `task_${slug}`,
+        );
+        if (existingBrief) {
+          brief = {
+            ...existingBrief,
+            searchPlanId: existing.id,
+            searchPlanVersion: existing.version,
+          };
+          storage.huntingBriefs.save(brief);
+        } else {
+          brief = {
+            id: asId<HuntingTaskId>(`task_${slug}`),
+            slug,
+            title: existing.topic,
+            description: `Confirmed search plan for: ${existing.topic}`,
+            lenses: ["pain", "workaround", "wtp", "contradictory_evidence"],
+            sourcesEnabled: existing.sourceFamilies.filter((source) =>
+              ["hn", "v2ex", "app_store", "stack_exchange", "manual"].includes(source),
+            ),
+            successCriteria: "Broad demand discovery with corroborated qualitative evidence",
+            createdAt: new Date().toISOString(),
+            searchPlanId: existing.id,
+            searchPlanVersion: existing.version,
+            queryPlan: {
+              harvestMode: "l0",
+              searches: existing.sourceFamilies
+                .filter((source) => ["hn", "v2ex", "app_store", "stack_exchange"].includes(source))
+                .map((platform) => ({ platform, terms: [existing.topic] })),
+            },
+          };
+          if (brief.sourcesEnabled.length === 0) {
+            brief = { ...brief, sourcesEnabled: ["hn", "stack_exchange"] };
+            brief = {
+              ...brief,
+              queryPlan: {
+                harvestMode: "l0",
+                searches: [
+                  { platform: "hn", terms: [existing.topic] },
+                  { platform: "stack_exchange", terms: [existing.topic] },
+                ],
+              },
+            };
+          }
+          storage.huntingBriefs.save(brief);
+        }
+      }
+
+      const confirmed = confirmSearchPlanEntity(existing, {
+        mode: input.mode ?? "explicit",
+        briefId: brief?.id,
+        briefSlug: brief?.slug,
+      });
+      storage.searchPlans.save(confirmed as { readonly id: string });
+      return { plan: confirmed, brief };
+    } finally {
+      storage.close();
+    }
+  }
+
+  private async requireConfirmedSearchPlan(brief: HuntingBrief): Promise<SearchPlan> {
+    if (!brief.searchPlanId) {
+      throw Object.assign(new Error(`Brief ${brief.slug} has no confirmed SearchPlan; run plan propose/confirm first`), {
+        code: "plan.required",
+      });
+    }
+    const plan = await this.getSearchPlan(brief.searchPlanId);
+    if (!plan) {
+      throw Object.assign(new Error(`Search plan not found: ${brief.searchPlanId}`), { code: "plan.not_found" });
+    }
+    if (plan.status !== "confirmed") {
+      throw Object.assign(new Error(`Search plan ${plan.id} is not confirmed`), { code: "plan.unconfirmed" });
+    }
+    return plan;
+  }
+
   async runResearch(
     slugOrId: string,
     options?: {
@@ -525,6 +683,7 @@ export class WorkspaceService {
     if (!brief) {
       throw new Error(`Brief not found: ${slugOrId}`);
     }
+    await this.requireConfirmedSearchPlan(brief);
     await this.migrateLegacyResearchState();
     await this.migrateLegacyDecisionState();
 
@@ -1544,6 +1703,12 @@ export class WorkspaceService {
         if (!existing || existing.slug !== slug) throw new Error(`Follow-up proposal already created as ${proposal.createdBriefId}`);
         return existing;
       }
+      const proposed = buildProposedSearchPlan({ topic: proposal.subject });
+      const confirmed = confirmSearchPlanEntity(proposed, {
+        mode: "start_now",
+        briefId: `task_${slug}`,
+        briefSlug: slug,
+      });
       const brief: HuntingBrief = {
         id: asId<HuntingTaskId>(`task_${slug}`), slug, title: `Follow-up: ${proposal.subject}`,
         description: `Investigate demand behind trend anomaly for ${proposal.subject}`,
@@ -1554,11 +1719,14 @@ export class WorkspaceService {
           { platform: "hn", terms: [proposal.subject, "pain", "workaround", "alternative"] },
           { platform: "stack_exchange", terms: [proposal.subject, "problem", "tool"] },
         ] },
+        searchPlanId: confirmed.id,
+        searchPlanVersion: confirmed.version,
         origin: { kind: "trend_anomaly", parentRunId: runId, trendEventId: proposal.triggerEventId, trendSeriesId: proposal.triggerSeriesId },
       };
       const createdProposal: FollowUpHuntingTaskProposal = { ...proposal, status: "created", createdBriefId: brief.id, createdAt: brief.createdAt };
       storage.transaction(() => {
         if (storage.huntingBriefs.list().some((item) => item.id === brief.id || item.slug === brief.slug)) throw new Error(`Brief already exists: ${slug}`);
+        storage.searchPlans.save({ ...confirmed, briefId: brief.id, briefSlug: brief.slug } as { readonly id: string });
         storage.huntingBriefs.save(brief);
         storage.followUpProposals.save(runId, createdProposal);
       });

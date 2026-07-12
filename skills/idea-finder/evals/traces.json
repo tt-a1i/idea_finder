@@ -3,10 +3,20 @@
     {
       "caseId": "discovery",
       "commands": [
-        "idea-finder workspace diagnostics --json",
-        "idea-finder brief create agent-workflows --title Agent-workflows --source hn --source stack_exchange --term agent-coding --json",
-        "idea-finder research run agent-workflows --json",
-        "idea-finder research inspect <runId> --json"
+        "idea-finder workspace diagnostics --workspace <dir> --json",
+        "idea-finder plan propose --topic \"agent coding workflows\" --language en --language zh --workspace <dir> --json"
+      ],
+      "response": "Human decision required: confirm personas, sources, languages, time window, and budgets before research.\nInference: no external search or ResearchRun has been started.\nUnresolved uncertainty: research has not started pending confirmation.",
+      "pausedForHumanDecision": true
+    },
+    {
+      "caseId": "discovery-confirmed",
+      "commands": [
+        "idea-finder workspace diagnostics --workspace <dir> --json",
+        "idea-finder plan propose --topic \"agent coding workflows\" --language en --language zh --workspace <dir> --json",
+        "idea-finder plan confirm <planId> --mode start_now --slug agent-coding-demand --workspace <dir> --json",
+        "idea-finder research run agent-coding-demand --workspace <dir> --json",
+        "idea-finder research inspect <runId> --workspace <dir> --json"
       ],
       "response": "Stored evidence: cite inspect-returned quotes and URLs.\nInference: describe only what those quotes support.\nContradictory evidence: report counter-signals beside support.\nUnresolved uncertainty: name missing personas, commercial intent, or coverage.",
       "pausedForHumanDecision": false
@@ -14,10 +24,11 @@
     {
       "caseId": "discovery-no-user-materials",
       "commands": [
-        "idea-finder workspace diagnostics --json",
-        "idea-finder brief create agent-workflows --title Agent-workflows --json",
-        "idea-finder research run agent-workflows --json",
-        "idea-finder research inspect <runId> --json"
+        "idea-finder workspace diagnostics --workspace <dir> --json",
+        "idea-finder plan propose --topic \"real demand discovery\" --language en --language zh --workspace <dir> --json",
+        "idea-finder plan confirm <planId> --mode explicit --slug agent-coding-demand --workspace <dir> --json",
+        "idea-finder research run agent-coding-demand --workspace <dir> --json",
+        "idea-finder research inspect <runId> --workspace <dir> --json"
       ],
       "response": "Partial result: public sources were unavailable or returned no usable evidence; no --manual-import was used.\nUnresolved uncertainty: qualitative demand remains unknown until real sources succeed or the user provides verbatim materials.",
       "pausedForHumanDecision": false
@@ -25,10 +36,12 @@
     {
       "caseId": "manual-import-verbatim",
       "commands": [
-        "idea-finder workspace diagnostics --json",
-        "idea-finder brief create agent-coding-demand --title Agent-coding-demand --manual-import Coordination handoffs break every Monday standup. --json",
-        "idea-finder research run agent-coding-demand --json",
-        "idea-finder research inspect <runId> --json"
+        "idea-finder workspace diagnostics --workspace <dir> --json",
+        "idea-finder plan propose --topic \"agent coding workflows\" --language en --language zh --workspace <dir> --json",
+        "idea-finder plan confirm <planId> --mode explicit --slug agent-coding-demand --workspace <dir> --json",
+        "idea-finder brief create agent-coding-demand-imports --title Agent-coding-demand-imports --manual-import Coordination handoffs break every Monday standup. --workspace <dir> --json",
+        "idea-finder research run agent-coding-demand-imports --workspace <dir> --json",
+        "idea-finder research inspect <runId> --workspace <dir> --json"
       ],
       "response": "Stored evidence: cite only the user-provided verbatim import and its stored provenance.\nInference: keep interpretation separate from the imported text.\nUnresolved uncertainty: willingness to pay and independent public sources remain untested.\nNote: multiple manual imports from the same user turn are one manual lane, not cross-source corroboration.",
       "pausedForHumanDecision": false
@@ -36,41 +49,41 @@
     {
       "caseId": "focused-research",
       "commands": [
-        "idea-finder workspace diagnostics --json",
-        "idea-finder brief create agent-demand --title Agent-demand --google-subject agent-coding --google-geo US --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool --from 2026-01-01 --to 2026-01-10 --json",
-        "idea-finder research run agent-demand --json",
-        "idea-finder research inspect <runId> --json"
+        "idea-finder workspace diagnostics --workspace <dir> --json",
+        "idea-finder brief create agent-demand --title Agent-demand --google-subject agent-coding --google-geo US --github-repo owner/repo --npm-package agent-tool --pypi-package agent-tool --from 2026-01-01 --to 2026-01-10 --workspace <dir> --json",
+        "idea-finder research run agent-demand --workspace <dir> --json",
+        "idea-finder research inspect <runId> --workspace <dir> --json"
       ],
       "response": "Stored evidence: cite the stored observations, quotes, and source URLs.\nTrend-only lead: Google, GitHub, npm, and PyPI indicate momentum or adoption, not validated demand.\nInference: keep the cross-lane interpretation conditional.\nUnresolved uncertainty: qualitative demand and willingness to pay still require evidence if absent.",
       "pausedForHumanDecision": false
     },
     {
       "caseId": "evidence-inspection",
-      "commands": ["idea-finder research inspect run_123 --claim claim_456 --json"],
+      "commands": ["idea-finder research inspect run_123 --claim claim_456 --workspace <dir> --json"],
       "response": "Stored evidence: quote only the returned detail and provenance URL.\nContradictory evidence: list returned counter-evidence.\nInference: separate interpretation from the source.\nUnresolved uncertainty: state missing or unverified references.",
       "pausedForHumanDecision": false
     },
     {
       "caseId": "incomplete-research",
       "commands": [
-        "idea-finder research inspect <runId> --json",
-        "idea-finder research run agent-demand --retry <runId> --json",
-        "idea-finder research inspect <runId> --json"
+        "idea-finder research inspect <runId> --workspace <dir> --json",
+        "idea-finder research run agent-demand --retry <runId> --workspace <dir> --json",
+        "idea-finder research inspect <runId> --workspace <dir> --json"
       ],
       "response": "Partial result: preserve successful lanes, name Google Trends throttling, and reuse the same run ID.\nStored evidence: cite retained GitHub and qualitative provenance.\nUnresolved uncertainty: search momentum remains unknown until authorized retry succeeds.",
       "pausedForHumanDecision": false
     },
     {
       "caseId": "validation",
-      "commands": ["idea-finder library inspect <opportunityId> --run <runId> --json"],
+      "commands": ["idea-finder library inspect <opportunityId> --run <runId> --workspace <dir> --json"],
       "response": "Stored evidence: present supporting and contradictory provenance first.\nInference: explain why a landing experiment might test the hypothesis.\nUnresolved uncertainty: the experiment type, hypothesis, and outcome are not yet approved.\nHuman decision required: ask the user to approve the calibration action, experiment type, and exact hypothesis before any mutation.",
       "pausedForHumanDecision": true
     },
     {
       "caseId": "monitoring",
       "commands": [
-        "idea-finder monitor schedule agent-demand --cadence weekly --min-cross-source-growth 1 --min-strong-pain-growth 1 --min-commercial-growth 1 --min-cooling-loss 2 --json",
-        "idea-finder monitor run agent-demand --json"
+        "idea-finder monitor schedule agent-demand --cadence weekly --min-cross-source-growth 1 --min-strong-pain-growth 1 --min-commercial-growth 1 --min-cooling-loss 2 --workspace <dir> --json",
+        "idea-finder monitor run agent-demand --workspace <dir> --json"
       ],
       "response": "Stored evidence: cite comparison evidence changes and notification reasons.\nPartial result: if coverage is incomplete, list missing lanes and do not call suppressed cooling a decline.\nUnresolved uncertainty: the first invocation is only a baseline and future runs may remain partial.",
       "pausedForHumanDecision": false

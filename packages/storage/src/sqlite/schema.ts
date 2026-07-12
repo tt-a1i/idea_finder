@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS hunting_briefs (
   payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS search_plans (
+  id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS research_run_configs (
   id TEXT PRIMARY KEY,
   payload_json TEXT NOT NULL

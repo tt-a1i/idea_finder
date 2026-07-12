@@ -73,6 +73,59 @@ export interface BriefQueryPlan {
   };
 }
 
+export type ResearchLens =
+  | "topic_synonym"
+  | "persona"
+  | "scenario"
+  | "pain_failure"
+  | "workaround"
+  | "alternative_seeking"
+  | "commercial_intent"
+  | "competitor_dissatisfaction"
+  | "contradiction"
+  | "language"
+  | "source";
+
+export interface SearchQueryVariant {
+  readonly id: string;
+  readonly queryText: string;
+  readonly language: string;
+  readonly source: string;
+  readonly lens: ResearchLens;
+  readonly round: number;
+  readonly parentQueryId?: string | null;
+  readonly triggerEvidenceId?: string | null;
+  readonly status: "pending" | "success" | "failure" | "skipped";
+  readonly itemCount: number;
+  readonly error?: string | null;
+}
+
+/** Confirmed or proposed broad research plan (canonical SQLite entity). */
+export interface SearchPlan {
+  readonly id: string;
+  readonly version: number;
+  readonly status: "proposed" | "confirmed";
+  readonly topic: string;
+  readonly personas: readonly string[];
+  readonly scenarios: readonly string[];
+  readonly languages: readonly string[];
+  readonly geography: string;
+  readonly timeWindow: { readonly from: string; readonly to: string };
+  readonly sourceFamilies: readonly string[];
+  readonly researchLenses: readonly ResearchLens[];
+  readonly budgets: { readonly queries: number; readonly documents: number; readonly rounds: number };
+  readonly confirmation: {
+    readonly mode: "explicit" | "start_now";
+    readonly confirmedAt: string | null;
+    readonly defaultsApplied: boolean;
+  };
+  readonly queries: readonly SearchQueryVariant[];
+  readonly briefId?: string | null;
+  readonly briefSlug?: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 /** Local hunting brief — config for a demand research workspace slice. */
 export interface HuntingBrief {
   readonly id: HuntingTaskId;
@@ -84,6 +137,8 @@ export interface HuntingBrief {
   readonly successCriteria: string;
   readonly createdAt: string;
   readonly queryPlan?: BriefQueryPlan;
+  readonly searchPlanId?: string;
+  readonly searchPlanVersion?: number;
   readonly origin?: { readonly kind: "trend_anomaly"; readonly parentRunId: string; readonly trendEventId: string; readonly trendSeriesId: string };
 }
 

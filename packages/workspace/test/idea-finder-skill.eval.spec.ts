@@ -25,7 +25,7 @@ function manualImportValues(args: readonly string[]): string[] {
 }
 
 describe("idea-finder companion Skill evaluations", () => {
-  it("loads the Skill and executes a discovery workflow without inventing manual imports", async () => {
+  it("loads the Skill and pauses for confirmation before any research run", async () => {
     const trace = await runSkillWorkflow({
       skillPath: path.join(skillRoot, "SKILL.md"),
       prompt: "帮我发现 agent coding 工作流里真实、反复出现的需求。",
@@ -33,16 +33,29 @@ describe("idea-finder companion Skill evaluations", () => {
 
     expect(trace.commands.map((command) => command.command)).toEqual([
       "workspace diagnostics",
-      "brief create",
+      "plan propose",
+    ]);
+    expect(trace.commands.every((command) => command.exitCode === 0 || command.exitCode === 6)).toBe(true);
+    expect(JSON.stringify(trace.commands)).not.toMatch(/research run|brief create|--manual-import|--fixture/);
+    expect(trace.response).toContain("Human decision required:");
+    expect(trace.pausedForHumanDecision).toBe(true);
+  }, 30_000);
+
+  it("after confirmation runs broad research without inventing manual imports", async () => {
+    const trace = await runSkillWorkflow({
+      skillPath: path.join(skillRoot, "SKILL.md"),
+      prompt: "帮我发现 agent coding 工作流里真实、反复出现的需求。确认：按默认计划直接开始。",
+    });
+
+    expect(trace.commands.map((command) => command.command)).toEqual([
+      "workspace diagnostics",
+      "plan propose",
+      "plan confirm",
       "research run",
       "research inspect",
     ]);
     expect(trace.commands.every((command) => command.exitCode === 0 || command.exitCode === 6)).toBe(true);
-    expect(trace.commands.every((command) => command.envelope.contractVersion === "1.0")).toBe(true);
-    expect(JSON.stringify(trace.commands)).not.toMatch(/--fixture(?:-set)?/);
     expect(allArgs(trace)).not.toContain("--manual-import");
-    expect(manualImportValues(allArgs(trace))).toEqual([]);
-    expect(trace.commands.some((command) => command.args.includes("--source") && command.args.includes("hn"))).toBe(true);
     expect(trace.response).toContain("Stored evidence:");
     expect(trace.response).toContain("Inference:");
     expect(trace.pausedForHumanDecision).toBe(false);
@@ -51,11 +64,10 @@ describe("idea-finder companion Skill evaluations", () => {
   it("reports partial or unresolved uncertainty instead of forging evidence when sources yield nothing", async () => {
     const trace = await runSkillWorkflow({
       skillPath: path.join(skillRoot, "SKILL.md"),
-      prompt: "帮我发现真实需求。我没有提供任何访谈笔记或人工材料，公开来源也不可用。",
+      prompt: "帮我发现真实需求。我没有提供任何访谈笔记或人工材料，公开来源也不可用。确认按默认计划开始。",
     });
 
     expect(allArgs(trace)).not.toContain("--manual-import");
-    expect(allArgs(trace)).not.toContain("--source");
     const hasPartialOrUnresolved =
       trace.response.includes("Partial result:") || trace.response.includes("Unresolved uncertainty:");
     expect(hasPartialOrUnresolved).toBe(true);
@@ -147,6 +159,7 @@ describe("idea-finder companion Skill evaluations", () => {
     expect(manifest.skill).toBe("idea-finder");
     expect(manifest.cases.map((item) => item.id).sort()).toEqual([
       "discovery",
+      "discovery-confirmed",
       "discovery-no-user-materials",
       "evidence-inspection",
       "focused-research",
@@ -177,7 +190,7 @@ describe("idea-finder companion Skill evaluations", () => {
         expect(trace.commands.join("\n")).not.toContain(forbidden);
       }
       for (const label of evaluation.requiredResponseLabels) expect(trace.response).toContain(`${label}:`);
-      if (evaluation.id === "validation") expect(trace.pausedForHumanDecision).toBe(true);
+      if (evaluation.id === "validation" || evaluation.id === "discovery") expect(trace.pausedForHumanDecision).toBe(true);
       if (evaluation.id === "manual-import-verbatim") {
         expect(trace.commands.some((command) => command.includes("--manual-import Coordination handoffs break every Monday standup."))).toBe(true);
       }

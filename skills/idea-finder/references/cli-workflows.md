@@ -20,7 +20,15 @@ After installation, invoke the executable as `idea-finder` (or the local `.bin` 
 
 ## Discovery and focused research
 
-Create a public qualitative-source Brief (no agent-invented manual imports):
+idea-finder plan propose --topic "Agent coding workflows" --workspace <dir> --json
+# Wait for user confirmation, then:
+idea-finder plan confirm <planId> --mode explicit --slug agent-workflows --workspace <dir> --json
+idea-finder research run agent-workflows --json
+idea-finder research inspect <runId> --json
+idea-finder export agent-workflows --json
+```
+
+Create a public qualitative-source Brief (no agent-invented manual imports) only after confirmation, or when continuing an existing Brief:
 
 ```bash
 idea-finder brief create agent-workflows --title "Agent coding workflows" --description "Repeated coordination pain" --lens pain,workaround,commercial_intent,contradictory_evidence --source hn --source stack_exchange --term "agent coding" --term workaround --json

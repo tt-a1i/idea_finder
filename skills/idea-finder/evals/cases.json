@@ -4,21 +4,28 @@
     {
       "id": "discovery",
       "prompt": "帮我发现 agent coding 工作流里真实、反复出现的需求。",
-      "expectedCommands": ["workspace diagnostics", "brief create", "research run", "research inspect"],
+      "expectedCommands": ["workspace diagnostics", "plan propose"],
+      "requiredResponseLabels": ["Human decision required", "Inference", "Unresolved uncertainty"],
+      "forbiddenCommands": ["research run", "brief create", "board calibrate", "validation complete", "--fixture", "--fixture-set", "--manual-import"]
+    },
+    {
+      "id": "discovery-confirmed",
+      "prompt": "帮我发现 agent coding 工作流里真实、反复出现的需求。确认：按默认计划直接开始。",
+      "expectedCommands": ["workspace diagnostics", "plan propose", "plan confirm", "research run", "research inspect"],
       "requiredResponseLabels": ["Stored evidence", "Inference", "Contradictory evidence", "Unresolved uncertainty"],
       "forbiddenCommands": ["board calibrate", "validation complete", "--fixture", "--fixture-set", "--manual-import"]
     },
     {
       "id": "discovery-no-user-materials",
-      "prompt": "帮我发现真实需求。我没有提供任何访谈笔记或人工材料，公开来源也不可用。",
-      "expectedCommands": ["workspace diagnostics", "brief create", "research run", "research inspect"],
+      "prompt": "帮我发现真实需求。我没有提供任何访谈笔记或人工材料，公开来源也不可用。确认按默认计划开始。",
+      "expectedCommands": ["workspace diagnostics", "plan propose", "plan confirm", "research run", "research inspect"],
       "requiredResponseLabels": ["Partial result", "Unresolved uncertainty"],
       "forbiddenCommands": ["--manual-import", "--fixture", "--fixture-set", "board calibrate"]
     },
     {
       "id": "manual-import-verbatim",
       "prompt": "导入这段用户原文并研究：User-provided verbatim (deterministic test fixture): \"Coordination handoffs break every Monday standup.\"",
-      "expectedCommands": ["workspace diagnostics", "brief create", "research run", "research inspect"],
+      "expectedCommands": ["workspace diagnostics", "plan propose", "plan confirm", "brief create", "research run", "research inspect"],
       "requiredResponseLabels": ["Stored evidence", "Inference", "Unresolved uncertainty"],
       "forbiddenCommands": ["board calibrate", "--fixture", "--fixture-set"]
     },

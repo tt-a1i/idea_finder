@@ -72,6 +72,9 @@ Usage:
   idea-finder research run <brief> [--transport-url <https-url>] [--fixture-set representative]
   idea-finder research inspect <runId> [--claim <claimId>]
   idea-finder research follow-up <runId> --proposal <id> --create <slug>
+  idea-finder plan propose --topic <text> [--persona <text> ...] [--scenario <text> ...] [--language <code> ...] [--geo <CC|WORLDWIDE>] [--from <iso>] [--to <iso>] [--source-family <name> ...] [--query-budget <n>] [--document-budget <n>] [--round-budget <n>]
+  idea-finder plan confirm <planId> [--mode <explicit|start_now>] [--slug <slug>] [--no-brief]
+  idea-finder plan inspect <planId>
   idea-finder export <brief> [--out <path.md>]
   idea-finder agent list
   idea-finder agent create --kind <research|browser|computer|coding> --intent <text> [--opportunity <id>] [--evidence <id,id>] [--domain-write] [--dry-run]
@@ -185,6 +188,9 @@ const ARGUMENT_SHAPES: Readonly<Record<string, ArgumentShape>> = {
   "research run": { valueFlags: ["--fixture-set", "--retry", "--resume", "--transport-url"], positionalCount: 3 },
   "research inspect": { valueFlags: ["--claim"], positionalCount: 3 },
   "research follow-up": { valueFlags: ["--proposal", "--create"], positionalCount: 3 },
+  "plan propose": { valueFlags: ["--topic", "--persona", "--scenario", "--language", "--geo", "--from", "--to", "--source-family", "--query-budget", "--document-budget", "--round-budget"], positionalCount: 2 },
+  "plan confirm": { valueFlags: ["--mode", "--slug"], booleanFlags: ["--no-brief"], positionalCount: 3 },
+  "plan inspect": { valueFlags: [], positionalCount: 3 },
   export: { valueFlags: ["--out"], positionalCount: 2 },
   "agent list": { valueFlags: [], positionalCount: 2 },
   "agent create": { valueFlags: ["--kind", "--intent", "--opportunity", "--evidence"], booleanFlags: ["--domain-write", "--dry-run"], positionalCount: 2 },
@@ -601,6 +607,66 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
     return { command: "research follow-up", data: { brief, proposalId, parentRunId: runId }, human: `Created follow-up brief ${brief.slug} from ${proposalId}` };
   }
 
+  if (cmd === "plan" && sub === "propose") {
+    const topic = required(flag(argv, "--topic") ?? flag(rest, "--topic"), "plan.topic_required", "--topic is required");
+    const queryBudget = flag(rest, "--query-budget");
+    const documentBudget = flag(rest, "--document-budget");
+    const roundBudget = flag(rest, "--round-budget");
+    const parseBudget = (raw: string | undefined, label: string): number | undefined => {
+      if (raw === undefined) return undefined;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) throw new CliFailure("validation", "plan.budget_invalid", `${label} must be a positive integer`, CLI_EXIT_CODES.validation);
+      return value;
+    };
+    const plan = await svc(workspaceDir).proposeSearchPlan({
+      topic,
+      personas: flags(rest, "--persona"),
+      scenarios: flags(rest, "--scenario"),
+      languages: flags(rest, "--language"),
+      geography: flag(rest, "--geo"),
+      timeWindow: flag(rest, "--from") && flag(rest, "--to") ? { from: flag(rest, "--from")!, to: flag(rest, "--to")! } : undefined,
+      sourceFamilies: flags(rest, "--source-family"),
+      budgets: {
+        queries: parseBudget(queryBudget, "--query-budget"),
+        documents: parseBudget(documentBudget, "--document-budget"),
+        rounds: parseBudget(roundBudget, "--round-budget"),
+      },
+    });
+    return {
+      command: "plan propose",
+      data: { plan },
+      human: `Proposed search plan ${plan.id} for "${plan.topic}" (status=proposed). Confirm before research.`,
+    };
+  }
+
+  if (cmd === "plan" && sub === "confirm") {
+    const planId = required(rest[0], "plan.id_required", "plan confirm requires <planId>");
+    const modeRaw = flag(rest, "--mode");
+    const mode = modeRaw ? oneOf(modeRaw, ["explicit", "start_now"] as const, "mode") : "explicit";
+    const result = await svc(workspaceDir).confirmSearchPlan({
+      planId,
+      mode,
+      slug: flag(rest, "--slug"),
+      createBrief: !has(rest, "--no-brief"),
+    });
+    return {
+      command: "plan confirm",
+      data: result,
+      human: `Confirmed search plan ${result.plan.id}${result.brief ? ` → brief ${result.brief.slug}` : ""}`,
+    };
+  }
+
+  if (cmd === "plan" && sub === "inspect") {
+    const planId = required(rest[0], "plan.id_required", "plan inspect requires <planId>");
+    const plan = await svc(workspaceDir).getSearchPlan(planId);
+    if (!plan) throw new CliFailure("missing-resource", "plan.not_found", `Search plan not found: ${planId}`, CLI_EXIT_CODES.missingResource, { planId });
+    return {
+      command: "plan inspect",
+      data: { plan },
+      human: `${plan.id}\tv${plan.version}\t${plan.status}\t${plan.topic}`,
+    };
+  }
+
   if (cmd === "trends" && ["observations", "series", "events"].includes(sub ?? "")) {
     const subject = flag(rest, "--subject")?.replace(/^github:/, "").toLowerCase();
     const metricRaw = flag(rest, "--metric");
@@ -706,6 +772,13 @@ function classify(error: unknown): CliFailure {
   if (error instanceof CliFailure) return error;
   if (error instanceof Error && error.name === "InvariantViolation") {
     return new CliFailure("validation", (error as Error & { code?: string }).code ?? "domain.invalid", error.message, CLI_EXIT_CODES.validation);
+  }
+  const code = (error as Error & { code?: string })?.code;
+  if (code === "plan.required" || code === "plan.unconfirmed") {
+    return new CliFailure("policy", code, (error as Error).message, CLI_EXIT_CODES.policy);
+  }
+  if (code === "plan.not_found" || (error instanceof Error && /Search plan not found/i.test(error.message))) {
+    return new CliFailure("missing-resource", "plan.not_found", (error as Error).message, CLI_EXIT_CODES.missingResource);
   }
   if (error instanceof Error && /not found/i.test(error.message)) {
     return new CliFailure("missing-resource", "resource.not_found", error.message, CLI_EXIT_CODES.missingResource);

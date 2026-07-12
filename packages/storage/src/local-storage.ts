@@ -108,6 +108,7 @@ export interface LocalStorage {
   readonly monitorSchedules: JsonEntityRepository<{ readonly id: string }>;
   readonly monitorComparisons: JsonEntityRepository<StoredMonitorComparisonRecord>;
   readonly agentTasks: JsonEntityRepository<{ readonly id: string }>;
+  readonly searchPlans: JsonEntityRepository<{ readonly id: string }>;
   readonly metricObservations: MetricObservationRepository;
   readonly normalizationContexts: NormalizationContextRepository;
   readonly trendSeries: TrendSeriesRepository;
@@ -150,6 +151,7 @@ export function openLocalStorage(options: LocalStorageOptions): LocalStorage {
     monitorSchedules: createJsonEntityRepository(db, "monitor_schedules"),
     monitorComparisons: createJsonEntityRepository(db, "monitor_comparisons"),
     agentTasks: createJsonEntityRepository(db, "agent_tasks"),
+    searchPlans: createJsonEntityRepository(db, "search_plans"),
     metricObservations: createMetricObservationRepository(db),
     normalizationContexts: createNormalizationContextRepository(db),
     trendSeries: createTrendSeriesRepository(db),

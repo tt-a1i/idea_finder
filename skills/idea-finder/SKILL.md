@@ -39,7 +39,19 @@ Read [references/cli-workflows.md](references/cli-workflows.md) for installation
 
 ### Discover or focus research
 
-Create a Brief when the user has no matching Brief or changes the subject, persona, geography, time window, repository, package, evidence lens, or source plan. Select only sources relevant to the claim. Use `research run` followed by `research inspect` for both qualitative-only and multi-lane research so every summarized claim has stored quote/document/source provenance. Use `export` to render the multi-lane report. Use inbox and Library commands only as additional admission views.
+For a broad research topic, **first** propose a SearchPlan and wait for explicit user confirmation before any external search or ResearchRun:
+
+1. `idea-finder plan propose --topic "<topic>" --workspace <dir> --json`
+2. Present topic, personas, scenarios, languages, geography, time window, source families, research lenses, and budgets. Ask the user to confirm or adjust.
+3. Until the user confirms (or clearly says to start now), do **not** call `research run`, source collection, evidence ingest, calibration, or validation mutations.
+4. After confirmation: `idea-finder plan confirm <planId> [--mode explicit|start_now] [--slug <slug>] --workspace <dir> --json`
+5. Then `research run` / `research inspect` / `export` using the Brief linked by confirm.
+
+If the user says "直接开始" / "just start", treat that as confirmation with `--mode start_now` and record the default plan parameters via `plan confirm` before researching.
+
+Create a Brief with `brief create` only when the user already has a confirmed plan path or is continuing an existing Brief. Prefer `plan propose → confirm` for new topics so confirmation is auditable via `plan inspect`.
+
+Select only sources relevant to the claim. Use `research run` followed by `research inspect` for both qualitative-only and multi-lane research so every summarized claim has stored quote/document/source provenance. Use `export` to render the multi-lane report. Use inbox and Library commands only as additional admission views.
 
 ### Inspect evidence
 
