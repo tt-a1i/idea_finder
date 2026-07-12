@@ -76,6 +76,7 @@ describe("installed standalone CLI", () => {
   it("ships only the executable, package metadata, README, and companion Skill assets", () => {
     expect(packedFiles).toEqual([
       "README.md",
+      "bin/idea-finder.js",
       "dist/idea-finder.js",
       "package.json",
       "skills/idea-finder/SKILL.md",
@@ -588,7 +589,7 @@ describe("installed standalone CLI", () => {
 
   it("ships the bundled executable and companion Skill required at runtime", async () => {
     const installedPackage = JSON.parse(await readFile(path.join(consumer, "node_modules", "idea-finder", "package.json"), "utf8")) as { bin: Record<string, string>; dependencies?: object };
-    expect(installedPackage.bin).toEqual({ "idea-finder": "./dist/idea-finder.js" });
+    expect(installedPackage.bin).toEqual({ "idea-finder": "./bin/idea-finder.js" });
     expect(installedPackage.dependencies).toBeUndefined();
     const installedSkill = await readFile(path.join(consumer, "node_modules", "idea-finder", "skills", "idea-finder", "SKILL.md"), "utf8");
     expect(installedSkill).toContain("name: idea-finder");

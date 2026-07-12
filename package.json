@@ -4,9 +4,10 @@
   "private": false,
   "type": "module",
   "bin": {
-    "idea-finder": "./dist/idea-finder.js"
+    "idea-finder": "./bin/idea-finder.js"
   },
   "files": [
+    "bin/idea-finder.js",
     "dist/idea-finder.js",
     "skills/idea-finder"
   ],
