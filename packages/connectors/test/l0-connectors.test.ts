@@ -62,11 +62,12 @@ describe("L0 connectors (fixture-backed)", () => {
     })) {
       docs.push(doc);
     }
-    expect(docs).toHaveLength(1);
+    expect(docs).toHaveLength(2);
+    expect(seen).toHaveLength(2);
     expect(seen[0]).toMatch(/^https:\/\/hn\.algolia\.com\/api\/v1\/search\?/);
+    expect(seen.every((item) => new URL(item).pathname === "/api/v1/search")).toBe(true);
+    expect(seen.map((item) => new URL(item).searchParams.get("query"))).toEqual(["agent coding", "context loss"]);
     const url = new URL(seen[0]!);
-    expect(url.pathname).toBe("/api/v1/search");
-    expect(url.searchParams.get("query")).toBe("agent coding context loss");
     expect(url.searchParams.get("tags")).toBe("story");
     expect(url.searchParams.get("hitsPerPage")).toBe("5");
     expect(url.searchParams.get("numericFilters")).toBe(`created_at_i>${Math.floor(Date.parse("2026-01-01T00:00:00.000Z") / 1000)}`);

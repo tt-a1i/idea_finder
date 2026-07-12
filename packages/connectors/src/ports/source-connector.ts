@@ -2,7 +2,10 @@ import type { RawDocument } from "@idea-finder/core";
 
 export interface SearchQuery {
   readonly platform: string;
+  /** Prefer a single query string. When omitted, connectors execute each term as its own query variant (not a joined AND). */
   readonly terms: readonly string[];
+  readonly queryText?: string;
+  readonly queryId?: string;
   readonly since?: string;
 }
 

@@ -3,6 +3,7 @@ import type { RawDocument } from "@idea-finder/core";
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher, fetchJson } from "../lib/fetch.js";
 import { normalizeDocument } from "../lib/normalize.js";
+import { resolveQueryTexts } from "../lib/query-texts.js";
 import type { SourceSearchQuery } from "../query-plan.js";
 import type { ConnectorHealth, SourceConnector } from "../ports/source-connector.js";
 
@@ -52,21 +53,23 @@ export function createHnAlgoliaConnector(options: HnAlgoliaConnectorOptions = {}
 
     async *search(query: SourceSearchQuery): AsyncIterable<RawDocument> {
       const limit = query.limit ?? 20;
-      const searchTerm = query.terms.join(" ");
-      const url = hnApiUrl(baseUrl, "/search");
-      url.searchParams.set("query", searchTerm);
-      url.searchParams.set("tags", "story");
-      url.searchParams.set("hitsPerPage", String(limit));
-      if (query.since) {
-        const sinceEpoch = Math.floor(Date.parse(query.since) / 1000);
-        if (!Number.isNaN(sinceEpoch)) {
-          url.searchParams.set("numericFilters", `created_at_i>${sinceEpoch}`);
+      const queryTexts = resolveQueryTexts(query);
+      for (const searchTerm of queryTexts) {
+        const url = hnApiUrl(baseUrl, "/search");
+        url.searchParams.set("query", searchTerm);
+        url.searchParams.set("tags", "story");
+        url.searchParams.set("hitsPerPage", String(limit));
+        if (query.since) {
+          const sinceEpoch = Math.floor(Date.parse(query.since) / 1000);
+          if (!Number.isNaN(sinceEpoch)) {
+            url.searchParams.set("numericFilters", `created_at_i>${sinceEpoch}`);
+          }
         }
-      }
 
-      const data = await fetchJson<HnSearchResponse>(fetcher, url);
-      for (const hit of data.hits) {
-        yield hitToDocument(hit, query);
+        const data = await fetchJson<HnSearchResponse>(fetcher, url);
+        for (const hit of data.hits) {
+          yield hitToDocument(hit, query);
+        }
       }
     },
 

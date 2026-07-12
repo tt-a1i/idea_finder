@@ -10,6 +10,8 @@ export interface SourceSearchQuery extends SearchQuery {
   readonly appId?: string;
   /** Stack Exchange site slug; defaults to stackoverflow. */
   readonly stackExchangeSite?: string;
+  readonly queryId?: string;
+  readonly queryText?: string;
 }
 
 /** Manual text/URL import payload (no live fetch for body). */

@@ -3,6 +3,7 @@ import type { RawDocument } from "@idea-finder/core";
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher, fetchJson } from "../lib/fetch.js";
 import { normalizeDocument } from "../lib/normalize.js";
+import { resolveQueryTexts } from "../lib/query-texts.js";
 import type { SourceSearchQuery } from "../query-plan.js";
 import type { ConnectorHealth, SourceConnector } from "../ports/source-connector.js";
 
@@ -48,18 +49,19 @@ export function createStackExchangeConnector(
     async *search(query: SourceSearchQuery): AsyncIterable<RawDocument> {
       const site = query.stackExchangeSite ?? defaultSite;
       const limit = query.limit ?? 20;
-      const searchTerm = query.terms.join(" ");
-      const url = new URL(`${baseUrl}/search/advanced`);
-      url.searchParams.set("order", "desc");
-      url.searchParams.set("sort", "activity");
-      url.searchParams.set("q", searchTerm);
-      url.searchParams.set("site", site);
-      url.searchParams.set("pagesize", String(Math.min(limit, 100)));
-      url.searchParams.set("filter", "withbody");
+      for (const searchTerm of resolveQueryTexts(query)) {
+        const url = new URL(`${baseUrl}/search/advanced`);
+        url.searchParams.set("order", "desc");
+        url.searchParams.set("sort", "activity");
+        url.searchParams.set("q", searchTerm);
+        url.searchParams.set("site", site);
+        url.searchParams.set("pagesize", String(Math.min(limit, 100)));
+        url.searchParams.set("filter", "withbody");
 
-      const data = await fetchJson<StackExchangeSearchResponse>(fetcher, url);
-      for (const item of data.items) {
-        yield itemToDocument(item, site, query);
+        const data = await fetchJson<StackExchangeSearchResponse>(fetcher, url);
+        for (const item of data.items) {
+          yield itemToDocument(item, site, query);
+        }
       }
     },
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { HuntingTaskId } from "@idea-finder/core";
-import type { QueryPlan } from "@idea-finder/connectors";
+import type { QueryPlan, SourceSearchQuery } from "@idea-finder/connectors";
 import type { HuntingBrief } from "../types.js";
 
 export function resolveHarvestMode(brief: HuntingBrief): "manual" | "l0" {
@@ -11,17 +11,60 @@ export function resolveHarvestMode(brief: HuntingBrief): "manual" | "l0" {
 export function buildQueryPlanFromBrief(
   brief: HuntingBrief,
   huntingTaskId: HuntingTaskId,
+  searchPlanQueries?: readonly { readonly id: string; readonly queryText: string; readonly source: string }[],
 ): QueryPlan {
+  if (searchPlanQueries && searchPlanQueries.length > 0) {
+    return {
+      huntingTaskId,
+      searches: searchPlanQueries
+        .filter((query) => ["hn", "v2ex", "app_store", "stack_exchange"].includes(query.source))
+        .map((query) => ({
+          platform: query.source,
+          terms: [query.queryText],
+          queryText: query.queryText,
+          queryId: query.id,
+          huntingTaskId,
+        })),
+      manualImports: brief.queryPlan?.manualImports,
+    };
+  }
+
   const saved = brief.queryPlan;
   const harvestMode = resolveHarvestMode(brief);
 
   if (saved?.searches?.length || saved?.manualImports?.length) {
+    // Expand multi-term searches into independent query variants (one term each).
+    const searches: SourceSearchQuery[] = [];
+    for (const search of saved.searches ?? []) {
+      const terms = [...search.terms];
+      if (terms.length <= 1) {
+        searches.push({
+          platform: search.platform,
+          terms,
+          queryText: terms[0],
+          huntingTaskId,
+          limit: search.limit,
+          appId: search.appId,
+          stackExchangeSite: search.stackExchangeSite,
+        });
+        continue;
+      }
+      for (const [index, term] of terms.entries()) {
+        searches.push({
+          platform: search.platform,
+          terms: [term],
+          queryText: term,
+          queryId: `legacy_${search.platform}_${index}`,
+          huntingTaskId,
+          limit: search.limit,
+          appId: search.appId,
+          stackExchangeSite: search.stackExchangeSite,
+        });
+      }
+    }
     return {
       huntingTaskId,
-      searches: (saved.searches ?? []).map((search) => ({
-        ...search,
-        huntingTaskId,
-      })),
+      searches,
       manualImports: saved.manualImports,
     };
   }
@@ -36,12 +79,16 @@ export function buildQueryPlanFromBrief(
       huntingTaskId,
       searches: brief.sourcesEnabled
         .filter((platform) => platform !== "manual" && platform !== "reddit")
-        .map((platform) => ({
-          platform,
-          terms: uniqueTerms.length > 0 ? uniqueTerms : ["tooling"],
-          huntingTaskId,
-          limit: 5,
-        })),
+        .flatMap((platform) =>
+          (uniqueTerms.length > 0 ? uniqueTerms : ["tooling"]).map((term, index) => ({
+            platform,
+            terms: [term],
+            queryText: term,
+            queryId: `l0_${platform}_${index}`,
+            huntingTaskId,
+            limit: 5,
+          })),
+        ),
       manualImports: undefined,
     };
   }

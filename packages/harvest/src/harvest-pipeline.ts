@@ -38,7 +38,7 @@ export function createHarvestPipeline(deps: HarvestPipelineDeps): HarvestPipelin
       const sourceExecutions: SourceExecutionResult[] = [];
 
       for (const [index, search] of plan.searches.entries()) {
-        const requestKey = `search:${index}:${search.platform}`;
+        const requestKey = search.queryId ? `query:${search.queryId}` : `search:${index}:${search.platform}`;
         if (options.completedRequestKeys?.has(requestKey)) continue;
         const startedAt = new Date().toISOString();
         const connector = connectorByPlatform(deps.connectors, search.platform);

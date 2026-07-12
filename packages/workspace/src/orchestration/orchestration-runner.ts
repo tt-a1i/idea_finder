@@ -73,7 +73,10 @@ export function createOrchestrationResearchRunner(
           },
         });
 
-        const queryPlan = buildQueryPlanFromBrief(brief, request.taskId);
+        const searchPlan = brief.searchPlanId
+          ? storage.searchPlans.get(brief.searchPlanId) as { queries?: readonly { id: string; queryText: string; source: string }[] } | null
+          : null;
+        const queryPlan = buildQueryPlanFromBrief(brief, request.taskId, searchPlan?.queries);
         const effectiveConfig = effectiveResearchConfig(brief);
         const configHash = effectiveResearchConfigHash(brief);
 

@@ -85,6 +85,7 @@ import type {
   WorkspaceState,
 } from "./types.js";
 import { emptyWorkspaceState } from "./types.js";
+import { buildBroadQueryVariants } from "./orchestration/broad-search-plan.js";
 import { buildProposedSearchPlan, confirmSearchPlanEntity, slugFromTopic } from "./orchestration/search-plan.js";
 import type { AgentKind, AgentPlannedEffect } from "@idea-finder/agents";
 
@@ -482,7 +483,8 @@ export class WorkspaceService {
     let searchPlanVersion = input.searchPlanVersion;
     if (!searchPlanId && input.attachConfirmedPlan !== false) {
       const proposed = buildProposedSearchPlan({ topic: input.title || input.slug });
-      const confirmed = confirmSearchPlanEntity(proposed, {
+      const withQueries = { ...proposed, queries: buildBroadQueryVariants(proposed) };
+      const confirmed = confirmSearchPlanEntity(withQueries, {
         mode: "start_now",
         briefId: `task_${input.slug}`,
         briefSlug: input.slug,
@@ -643,7 +645,11 @@ export class WorkspaceService {
         }
       }
 
-      const confirmed = confirmSearchPlanEntity(existing, {
+      const withQueries = existing.queries.length > 0
+        ? existing
+        : { ...existing, queries: buildBroadQueryVariants(existing), updatedAt: new Date().toISOString() };
+
+      const confirmed = confirmSearchPlanEntity(withQueries, {
         mode: input.mode ?? "explicit",
         briefId: brief?.id,
         briefSlug: brief?.slug,

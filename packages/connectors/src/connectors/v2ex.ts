@@ -3,6 +3,7 @@ import type { RawDocument } from "@idea-finder/core";
 import type { FetchOptions } from "../lib/fetch.js";
 import { createRateLimitedFetcher, fetchJson } from "../lib/fetch.js";
 import { normalizeDocument } from "../lib/normalize.js";
+import { resolveQueryTexts } from "../lib/query-texts.js";
 import type { SourceSearchQuery } from "../query-plan.js";
 import type { ConnectorHealth, SourceConnector } from "../ports/source-connector.js";
 
@@ -43,15 +44,16 @@ export function createV2exConnector(options: V2exConnectorOptions = {}): SourceC
 
     async *search(query: SourceSearchQuery): AsyncIterable<RawDocument> {
       const limit = query.limit ?? 20;
-      const searchTerm = query.terms.join(" ");
-      const url = new URL(`${baseUrl}/search.json`);
-      url.searchParams.set("q", searchTerm);
-      url.searchParams.set("from", "0");
-      url.searchParams.set("size", String(limit));
+      for (const searchTerm of resolveQueryTexts(query)) {
+        const url = new URL(`${baseUrl}/search.json`);
+        url.searchParams.set("q", searchTerm);
+        url.searchParams.set("from", "0");
+        url.searchParams.set("size", String(limit));
 
-      const data = await fetchJson<V2exSearchResponse>(fetcher, url);
-      for (const topic of data.result) {
-        yield topicToDocument(topic, query);
+        const data = await fetchJson<V2exSearchResponse>(fetcher, url);
+        for (const topic of data.result) {
+          yield topicToDocument(topic, query);
+        }
       }
     },
 
