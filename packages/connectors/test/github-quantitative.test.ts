@@ -156,6 +156,21 @@ describe("GitHub quantitative connector", () => {
     expect(limited).toHaveBeenCalledTimes(1);
   });
 
+  it("maps bare 401/403 without rate-limit signals to authorization errors", async () => {
+    for (const status of [401, 403] as const) {
+      const fetchFn = vi.fn(async () => new Response("denied", { status })) as typeof fetch;
+      const connector = createGitHubQuantitativeConnector({
+        fetchFn, baseUrl: "https://api.github.test", token: "bad", minIntervalMs: 0,
+      });
+      await expect(connector.collect({ subject: "octocat/Hello-World" }))
+        .rejects.toMatchObject({
+          name: "GitHubAuthorizationError",
+          statusCode: status,
+          message: expect.stringMatching(/unauthorized/i),
+        });
+    }
+  });
+
   it("validates since before network access and rejects conflicting duplicate payloads", async () => {
     const neverFetch = vi.fn() as unknown as typeof fetch;
     const invalid = createGitHubQuantitativeConnector({ fetchFn: neverFetch, baseUrl: "https://api.github.test", token: "", minIntervalMs: 0 });

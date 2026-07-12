@@ -33,6 +33,13 @@ export class GitHubRateLimitError extends Error {
   }
 }
 
+export class GitHubAuthorizationError extends Error {
+  constructor(message: string, readonly statusCode: number) {
+    super(message);
+    this.name = "GitHubAuthorizationError";
+  }
+}
+
 interface GitHubIssueResponse {
   readonly id: number;
   readonly created_at: string;
@@ -150,13 +157,23 @@ export function createGitHubQuantitativeConnector(options: GitHubQuantitativeCon
     const resetRaw = response.headers.get("x-ratelimit-reset");
     const resetAt = resetRaw !== null && /^\d+$/.test(resetRaw) ? new Date(Number(resetRaw) * 1000).toISOString() : null;
     if (!response.ok) {
-      if (response.status === 429 || response.status === 403 || retryAfter !== null || response.headers.get("x-ratelimit-remaining") === "0") {
+      const rateLimited =
+        response.status === 429
+        || retryAfter !== null
+        || response.headers.get("x-ratelimit-remaining") === "0";
+      if (rateLimited) {
         exhaustedUntil = resetAt
           ?? (retryAfter !== null ? new Date(now().getTime() + retryAfter * 1000).toISOString() : "unknown");
         throw new GitHubRateLimitError(
           `GitHub API rate limited (HTTP ${response.status}); retry-after=${retryAfter ?? "unknown"}; reset=${resetAt ?? "unknown"}`,
           retryAfter,
           resetAt,
+        );
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new GitHubAuthorizationError(
+          `GitHub API unauthorized (HTTP ${response.status}) for ${url}`,
+          response.status,
         );
       }
       throw new Error(`HTTP ${response.status} for ${url}`);

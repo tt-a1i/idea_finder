@@ -28,6 +28,7 @@ describe("@idea-finder/orchestration", () => {
     try {
       const storage = openLocalStorage({ dataDir });
       let attempt = 0;
+      let intelligenceCount = 0;
       const skippedKeys: string[][] = [];
       const status = (id: string, source: string, value: "success" | "throttled", reason: string | null) => ({
         id, requestKey: id, source, status: value, itemCount: value === "success" ? 1 : 0,
@@ -43,18 +44,65 @@ describe("@idea-finder/orchestration", () => {
             ? [status("search:0:hn", "hn", "success", null), status("search:1:v2ex", "v2ex", "throttled", "429 rate limited")]
             : [status("search:1:v2ex", "v2ex", "success", null)] };
         } },
-        intelligence: { async run() {} },
+        intelligence: { async run() { intelligenceCount += 1; } },
       });
       const run = orchestrator.createRun({ huntingTaskId: asId("task-partial"), configHash: "cfg_partial" });
       const partial = await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
       expect(partial).toMatchObject({ status: "partial", errorMessage: "429 rate limited" });
+      expect(intelligenceCount).toBe(1);
+      expect(storage.pipelineSteps.isComplete(run.id, PIPELINE_STEPS.intelligence)).toBe(false);
       expect(storage.sourceStatuses.listByRun(run.id)).toEqual(expect.arrayContaining([expect.objectContaining({ id: "search:0:hn", status: "success" }), expect.objectContaining({ id: "search:1:v2ex", status: "throttled" })]));
       const recovered = await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
       expect(recovered).toMatchObject({ status: "completed", errorMessage: null });
+      expect(intelligenceCount).toBe(2);
+      expect(storage.pipelineSteps.isComplete(run.id, PIPELINE_STEPS.intelligence)).toBe(true);
       expect(skippedKeys[1]).toEqual(["search:0:hn"]);
       expect(storage.sourceStatuses.listByRun(run.id).find((item) => item.id === "search:1:v2ex")).toMatchObject({ status: "success" });
       storage.close();
     } finally { rmSync(dataDir, { recursive: true, force: true }); }
+  });
+
+  it("re-runs intelligence after partial recovery even if a prior pass marked the step complete", async () => {
+    const dataDir = tempDataDir();
+    try {
+      const storage = openLocalStorage({ dataDir });
+      let attempt = 0;
+      let intelligenceCount = 0;
+      const status = (id: string, value: "success" | "throttled") => ({
+        id, requestKey: id, source: "hn", status: value, itemCount: value === "success" ? 1 : 0,
+        reasonCode: value === "success" ? "none" as const : "throttled" as const,
+        reason: value === "success" ? null : "429",
+        startedAt: "2026-07-11T00:00:00.000Z", completedAt: "2026-07-11T00:00:01.000Z",
+        retryAt: value === "throttled" ? "2026-07-11T00:01:00.000Z" : null,
+      });
+      const orchestrator = createResearchRunOrchestrator({
+        stores: storage,
+        harvest: {
+          async runHarvest() {
+            attempt += 1;
+            return {
+              documents: [], chunks: [], signals: [],
+              sourceExecutions: attempt === 1
+                ? [status("search:0:hn", "success"), status("search:1:v2ex", "throttled")]
+                : [status("search:1:v2ex", "success")],
+            };
+          },
+        },
+        intelligence: { async run() { intelligenceCount += 1; } },
+      });
+      const run = orchestrator.createRun({ huntingTaskId: asId("task-legacy-partial"), configHash: "cfg_legacy" });
+      await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
+      // Simulate older builds that marked intelligence complete while still partial.
+      storage.pipelineSteps.markComplete(run.id, PIPELINE_STEPS.intelligence);
+      storage.pipelineSteps.markComplete(run.id, PIPELINE_STEPS.libraryAdmission);
+      expect(intelligenceCount).toBe(1);
+      const recovered = await orchestrator.runPipeline(run.id, { queryPlan: testQueryPlan(run.huntingTaskId) });
+      expect(recovered.status).toBe("completed");
+      expect(intelligenceCount).toBe(2);
+      storage.close();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
   it("wires harvest and intelligence scaffolds", async () => {
     const plan = testQueryPlan();

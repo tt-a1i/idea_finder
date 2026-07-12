@@ -120,20 +120,26 @@ export function createResearchRunOrchestrator(
         const sourceStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ status: string; reason: string | null }>;
         const incompleteSources = sourceStatuses.filter((item) => item.status !== "success");
         const hasSuccessfulSource = sourceStatuses.some((item) => item.status === "success");
+        const newlySuccessfulHarvest = (harvestResult?.sourceExecutions ?? []).some((item) => item.status === "success");
         if (!harvestAlreadyComplete && incompleteSources.length === 0) stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.harvest);
         if (!hasSuccessfulSource && incompleteSources.length > 0) throw new Error(incompleteSources.map((item) => item.reason).filter(Boolean).join("; ") || "All research sources failed");
 
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || incompleteSources.length > 0) {
+        // Re-run intelligence/admission when harvest recovers sources, even if a prior
+        // partial pass marked those steps complete before the new documents existed.
+        const shouldRefreshDownstream =
+          incompleteSources.length > 0 || newlySuccessfulHarvest;
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || shouldRefreshDownstream) {
           await intelligence.run(runId);
-          stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);
+          if (incompleteSources.length === 0) {
+            stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);
+          }
         }
 
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission) || incompleteSources.length > 0) {
+        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.libraryAdmission) || shouldRefreshDownstream) {
           await admitRunToLibrary(runId, stores);
-          stores.pipelineSteps.markComplete(
-            runId,
-            PIPELINE_STEPS.libraryAdmission,
-          );
+          if (incompleteSources.length === 0) {
+            stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.libraryAdmission);
+          }
         }
 
         run = {

@@ -35,7 +35,7 @@ Create a Brief when the user has no matching Brief or changes the subject, perso
 
 ### Inspect evidence
 
-Use `research inspect` for multi-lane claims and provenance. Use `library inspect` for an admitted Opportunity and `library rejected` for failed admission. Report contradictory evidence beside supporting evidence.
+Use `research inspect` for multi-lane claims and provenance. Use `library inspect <opportunityId> --run <runId>` for an admitted Opportunity and `library rejected --run <runId>` for failed admission. Report contradictory evidence beside supporting evidence.
 
 ### Handle incomplete work
 

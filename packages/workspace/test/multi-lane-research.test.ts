@@ -77,4 +77,70 @@ describe("multi-lane demand research", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("keeps ResearchRun failed when qualitative pipeline fails before quantitative lanes succeed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-multi-lane-failed-"));
+    try {
+      const service = new WorkspaceService({
+        paths: resolveWorkspacePaths(root),
+        runner: {
+          async run(brief, request) {
+            const now = new Date().toISOString();
+            return {
+              execution: request.execution,
+              run: {
+                id: request.runId,
+                huntingTaskId: request.taskId,
+                status: "failed",
+                startedAt: now,
+                completedAt: now,
+                configHash: `cfg_${brief.slug}`,
+                errorMessage: "transient intelligence failure",
+              },
+              documents: [],
+              chunks: [],
+              signals: [],
+              evidence: [],
+              drafts: [],
+              opportunities: [],
+              admissionResults: [],
+              sourceStatuses: [{
+                id: "search:0:manual",
+                requestKey: "search:0:manual",
+                source: "manual_import",
+                status: "success",
+                itemCount: 1,
+                reasonCode: "none",
+                reason: null,
+                startedAt: now,
+                completedAt: now,
+                retryAt: null,
+              }],
+              config: { id: request.runId, effectiveConfig: { fixture: true }, execution: request.execution },
+            };
+          },
+        },
+      });
+      await service.createBrief({
+        slug: "failed-qual",
+        title: "Failed qualitative",
+        description: "Intelligence boom",
+        queryPlan: {
+          harvestMode: "manual",
+          manualImports: [{ text: "painful agent reconciliation every day", url: "https://example.test/a" }],
+          quantitative: {
+            googleTrends: [{ subject: "agent coding", geography: "US", from: "2026-01-01T00:00:00Z", to: "2026-01-10T00:00:00Z", granularity: "day" }],
+            github: [{ repository: "owner/repo" }],
+            packages: [{ ecosystem: "npm", package: "agent-tool", from: "2026-01-01", to: "2026-01-03" }],
+          },
+        },
+      });
+      const report = await service.runMultiLaneResearch("failed-qual", { fixtureSet: "representative" });
+      const run = (await service.getState()).runs.find((item) => item.run.id === report.runId)?.run;
+      expect(run).toMatchObject({ status: "failed", errorMessage: "transient intelligence failure" });
+      expect(service.listResearchSourceStatuses(report.runId as never).some((status) => status.source === "github" && status.status === "success")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

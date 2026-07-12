@@ -61,8 +61,10 @@ idea-finder research run agent-workflows --json
 idea-finder research inspect <runId> --json
 idea-finder inbox --brief agent-workflows --json
 idea-finder library --brief agent-workflows --json
+idea-finder library rejected --run <runId> --json
 ```
 
+Run each CLI command as its own invocation. Do not chain exploratory `ls` or path probes with `&&` before the first `workspace diagnostics` call; create the workspace by passing `--workspace <dir>` to the CLI.
 ## Incomplete research and retry
 
 Read `data.sourceStatuses`, `incompleteness.reasons`, and retained claims when status is `partial`. Retry the same run:

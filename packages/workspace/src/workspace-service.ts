@@ -1387,7 +1387,17 @@ export class WorkspaceService {
       canonical.transaction(() => {
         for (const status of sourceStatuses.values()) canonical.sourceStatuses.save(stored.run.id, status);
         const incompleteStatuses = [...sourceStatuses.values()].filter((status) => status.status !== "success");
-        canonical.researchRuns.save({ ...stored.run, status: incompleteStatuses.length > 0 ? "partial" : "completed", completedAt: new Date().toISOString(), errorMessage: incompleteStatuses.length > 0 ? incompleteStatuses.map((status) => `${status.source}: ${status.reason ?? status.reasonCode}`).join("; ") : null });
+        // Preserve qualitative pipeline failure; quantitative lane outcomes must not
+        // silently promote a failed ResearchRun to partial/completed.
+        const nextStatus = stored.run.status === "failed"
+          ? "failed"
+          : incompleteStatuses.length > 0 ? "partial" : "completed";
+        const nextError = stored.run.status === "failed"
+          ? stored.run.errorMessage
+          : incompleteStatuses.length > 0
+            ? incompleteStatuses.map((status) => `${status.source}: ${status.reason ?? status.reasonCode}`).join("; ")
+            : null;
+        canonical.researchRuns.save({ ...stored.run, status: nextStatus, completedAt: new Date().toISOString(), errorMessage: nextError });
         for (const proposal of followUps) if (!canonical.followUpProposals.get(stored.run.id, proposal.id)) canonical.followUpProposals.save(stored.run.id, proposal);
         canonical.multiLaneReports.save(report);
       });

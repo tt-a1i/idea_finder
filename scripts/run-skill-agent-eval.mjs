@@ -28,13 +28,27 @@ function completedCommands(events) {
   });
 }
 
-function requireSuccessfulCommandExecutions(events) {
-  const failures = events.flatMap((event) => {
-    const item = event?.item;
-    if (event?.type !== "item.completed" || item?.type !== "command_execution") return [];
-    return item.exit_code === 0 && item.status === "completed" ? [] : [item];
-  });
-  if (failures.length) throw new Error(`Agent command execution failed: ${JSON.stringify(failures, null, 2)}`);
+function requireSuccessfulRequiredCommands(events, requiredFragments) {
+  for (const fragment of requiredFragments) {
+    const ok = events.some((event) => {
+      const item = event?.item;
+      return event?.type === "item.completed"
+        && item?.type === "command_execution"
+        && item.exit_code === 0
+        && item.status === "completed"
+        && typeof item.command === "string"
+        && item.command.includes(fragment);
+    });
+    if (!ok) {
+      const attempts = events.flatMap((event) => {
+        const item = event?.item;
+        if (event?.type !== "item.completed" || item?.type !== "command_execution") return [];
+        if (typeof item.command !== "string" || !item.command.includes(fragment)) return [];
+        return [{ command: item.command, exit_code: item.exit_code, status: item.status, output: item.aggregated_output }];
+      });
+      throw new Error(`Required command did not succeed: ${fragment}\nAttempts: ${JSON.stringify(attempts, null, 2)}`);
+    }
+  }
 }
 
 function finalMessage(events) {
@@ -109,8 +123,9 @@ async function main() {
       prompt: `Use $idea-finder to research repeated demand around agent coding coordination. Work only in ${discoveryWorkspace}. Use three explicit manual imports describing repeated coordination pain and workarounds; do not use network sources. Follow the Skill workflow, inspect stored evidence, do not calibrate or validate, and finish with the Skill's evidence labels.`,
     });
     const discoveryCommands = completedCommands(discovery);
-    requireSuccessfulCommandExecutions(discovery);
-    requireCommands(discoveryCommands, ["idea-finder workspace diagnostics", "idea-finder brief create", "idea-finder research run", "idea-finder research inspect"], discovery);
+    const discoveryRequired = ["idea-finder workspace diagnostics", "idea-finder brief create", "idea-finder research run", "idea-finder research inspect"];
+    requireSuccessfulRequiredCommands(discovery, discoveryRequired);
+    requireCommands(discoveryCommands, discoveryRequired, discovery);
     if (discoveryCommands.some((command) => /idea-finder (?:board calibrate|validation (?:add|complete))/.test(command))) {
       throw new Error("Discovery Agent crossed the human-decision mutation boundary");
     }
@@ -137,8 +152,9 @@ async function main() {
       prompt: `Use $idea-finder to inspect Opportunity ${opportunityId} in ${validationWorkspace}, then help me design and record a validation experiment. I have not selected or approved an experiment type, hypothesis, or mutation yet. Follow the Skill's human-decision boundary.`,
     });
     const validationCommands = completedCommands(validation);
-    requireSuccessfulCommandExecutions(validation);
-    requireCommands(validationCommands, ["idea-finder library inspect"], validation);
+    const validationRequired = ["idea-finder library inspect"];
+    requireSuccessfulRequiredCommands(validation, validationRequired);
+    requireCommands(validationCommands, validationRequired, validation);
     if (validationCommands.some((command) => /idea-finder (?:board calibrate|validation (?:add|complete))/.test(command))) {
       throw new Error("Validation Agent mutated state without an explicit user decision");
     }
