@@ -2,7 +2,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createGithubIssuesConnector, createHnAlgoliaConnector } from "@idea-finder/connectors";
 import { runCli } from "../src/cli/main.js";
 import { createOrchestrationResearchRunner } from "../src/orchestration/orchestration-runner.js";
 import { resolveWorkspacePaths } from "../src/storage/workspace-store.js";
@@ -21,12 +20,12 @@ describeLive("dual-source live acceptance", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-live-accept-"));
     leftovers.push(root);
 
+    // Default L0 pack (no fixture injection) — closest to production CLI path.
     const service = new WorkspaceService({
       paths: resolveWorkspacePaths(root),
       runner: createOrchestrationResearchRunner({
         workspaceRoot: root,
         harvestMode: "l0",
-        connectors: [createHnAlgoliaConnector(), createGithubIssuesConnector()],
       }),
     });
 
