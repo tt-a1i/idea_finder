@@ -41,6 +41,10 @@ export interface ResearchLedger {
   readonly lastCheckpoint?: {
     readonly round: number;
     readonly phase: "harvested" | "round_complete";
+    /** Document count before this round's harvest; required when phase is harvested. */
+    readonly docsBefore?: number;
+    /** Evidence count before this round's harvest; required when phase is harvested. */
+    readonly evidenceBefore?: number;
   };
 }
 

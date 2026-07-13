@@ -449,10 +449,22 @@ describe("runBroadResearchRounds", () => {
       effectiveConfig: { mode: "test" },
     })).rejects.toThrow("intelligence crashed");
 
-    const midConfig = storage.researchRunConfigs.get(runId) as { researchLedger?: { lastCheckpoint?: { phase: string; round: number }; stopReason: string } };
-    expect(midConfig.researchLedger?.lastCheckpoint?.phase).toBe("harvested");
+    const midConfig = storage.researchRunConfigs.get(runId) as {
+      researchLedger?: {
+        lastCheckpoint?: { phase: string; round: number; docsBefore?: number; evidenceBefore?: number };
+        stopReason: string;
+      };
+    };
+    const checkpoint = midConfig.researchLedger?.lastCheckpoint;
+    expect(checkpoint?.phase).toBe("harvested");
+    expect(checkpoint?.docsBefore).toBe(0);
+    expect(checkpoint?.evidenceBefore).toBe(0);
     const midPlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
     expect(midPlan.queries.some((query) => query.status === "success")).toBe(true);
+    const docsAfterHarvest = storage.rawDocuments.listByRun(runId).length;
+    const evidenceAfterHarvest = storage.evidenceItems.listByRun(runId).length;
+    expect(docsAfterHarvest).toBeGreaterThan(checkpoint!.docsBefore!);
+    expect(evidenceAfterHarvest).toBe(checkpoint!.evidenceBefore!);
     const harvestAfterCrash = harvestCalls;
 
     const resumed = await runBroadResearchRounds({
@@ -469,6 +481,14 @@ describe("runBroadResearchRounds", () => {
     expect(intelCalls).toBeGreaterThanOrEqual(2);
     expect(resumed.ledger.lastCheckpoint?.phase).toBe("round_complete");
     expect(resumed.ledger.rounds.length).toBeGreaterThanOrEqual(1);
+    const round1 = resumed.ledger.rounds.find((round) => round.round === 1);
+    expect(round1).toBeDefined();
+    const docsFinal = storage.rawDocuments.listByRun(runId).length;
+    const evidenceFinal = storage.evidenceItems.listByRun(runId).length;
+    expect(round1!.newDocumentCount).toBe(docsFinal - checkpoint!.docsBefore!);
+    expect(round1!.newEvidenceCount).toBe(evidenceFinal - checkpoint!.evidenceBefore!);
+    expect(round1!.newDocumentCount).toBe(docsAfterHarvest - checkpoint!.docsBefore!);
+    expect(round1!.newDocumentCount).toBeGreaterThan(0);
     storage.close();
   });
 

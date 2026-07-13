@@ -151,8 +151,16 @@ export async function runBroadResearchRounds(input: {
     stopReason: ResearchStopReason,
     phase: "harvested" | "round_complete",
     round: number,
+    harvestBaseline?: { readonly docsBefore: number; readonly evidenceBefore: number },
   ) => {
-    lastCheckpoint = { round, phase };
+    lastCheckpoint = phase === "harvested" && harvestBaseline
+      ? {
+          round,
+          phase,
+          docsBefore: harvestBaseline.docsBefore,
+          evidenceBefore: harvestBaseline.evidenceBefore,
+        }
+      : { round, phase };
     const ledger: ResearchLedger = {
       rounds,
       stopReason,
@@ -259,12 +267,13 @@ export async function runBroadResearchRounds(input: {
       const queryIds = queries
         .filter((query) => query.round === roundNumber && query.status !== "pending")
         .map((query) => query.id);
-      const docsBefore = deps.storage.rawDocuments.listByRun(runId).length;
-      const evidenceBefore = deps.storage.evidenceItems.listByRun(runId).length;
+      if (lastCheckpoint.docsBefore === undefined || lastCheckpoint.evidenceBefore === undefined) {
+        throw new Error("harvested checkpoint missing docsBefore/evidenceBefore baseline");
+      }
       stopReason = await finishIntelligenceAndRound({
         queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
-        docsBefore,
-        evidenceBefore,
+        docsBefore: lastCheckpoint.docsBefore,
+        evidenceBefore: lastCheckpoint.evidenceBefore,
         countAttempt: false,
       });
       continue;
@@ -325,8 +334,8 @@ export async function runBroadResearchRounds(input: {
     const allStatuses = sourceStatusesNow();
     queries = applyQueryExecutionWriteback(queries, allStatuses, executedIds);
     executedQueryCount += selection.toRun.length;
-    // Checkpoint A: query writeback before intelligence so crash mid-intel is resumable.
-    persistAtomic("continue", "harvested", roundNumber);
+    // Checkpoint A: query writeback + harvest baselines before intelligence so crash mid-intel is resumable.
+    persistAtomic("continue", "harvested", roundNumber, { docsBefore, evidenceBefore });
 
     stopReason = await finishIntelligenceAndRound({
       queryIds: selection.toRun.map((query) => query.id),
