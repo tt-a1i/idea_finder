@@ -128,12 +128,15 @@ export async function runBroadResearchRounds(input: {
 
   const signalsAtStart = deps.storage.rawSignals.listByRun(runId);
   const independenceAtStart = independenceMap(deps.storage, runId);
-  let knownClusterIds = new Set(
-    clusterPainSignals({
-      signals: signalsAtStart,
-      independenceGroupByDocumentId: independenceAtStart,
-    }).map((cluster) => cluster.id),
-  );
+  // Resume from harvested: harvest already persisted this round's signals — do not treat them as prior clusters.
+  let knownClusterIds = lastCheckpoint?.phase === "harvested" && lastCheckpoint.knownClusterIds !== undefined
+    ? new Set(lastCheckpoint.knownClusterIds)
+    : new Set(
+      clusterPainSignals({
+        signals: signalsAtStart,
+        independenceGroupByDocumentId: independenceAtStart,
+      }).map((cluster) => cluster.id),
+    );
 
   // Budget: count only successful/skipped queries; failed/partial retries get a fresh attempt slot.
   let executedQueryCount = queries.filter((query) => query.status === "success" || query.status === "skipped").length;
@@ -151,7 +154,11 @@ export async function runBroadResearchRounds(input: {
     stopReason: ResearchStopReason,
     phase: "harvested" | "round_complete",
     round: number,
-    harvestBaseline?: { readonly docsBefore: number; readonly evidenceBefore: number },
+    harvestBaseline?: {
+      readonly docsBefore: number;
+      readonly evidenceBefore: number;
+      readonly knownClusterIds: readonly string[];
+    },
   ) => {
     lastCheckpoint = phase === "harvested" && harvestBaseline
       ? {
@@ -159,6 +166,7 @@ export async function runBroadResearchRounds(input: {
           phase,
           docsBefore: harvestBaseline.docsBefore,
           evidenceBefore: harvestBaseline.evidenceBefore,
+          knownClusterIds: [...harvestBaseline.knownClusterIds],
         }
       : { round, phase };
     const ledger: ResearchLedger = {
@@ -267,13 +275,24 @@ export async function runBroadResearchRounds(input: {
       const queryIds = queries
         .filter((query) => query.round === roundNumber && query.status !== "pending")
         .map((query) => query.id);
-      if (lastCheckpoint.docsBefore === undefined || lastCheckpoint.evidenceBefore === undefined) {
-        throw new Error("harvested checkpoint missing docsBefore/evidenceBefore baseline");
+      const docsBefore = lastCheckpoint.docsBefore;
+      const evidenceBefore = lastCheckpoint.evidenceBefore;
+      const clusterBaseline = lastCheckpoint.knownClusterIds;
+      if (docsBefore === undefined || evidenceBefore === undefined || clusterBaseline === undefined) {
+        const missing = [
+          docsBefore === undefined ? "docsBefore" : null,
+          evidenceBefore === undefined ? "evidenceBefore" : null,
+          clusterBaseline === undefined ? "knownClusterIds" : null,
+        ].filter((item): item is string => item !== null);
+        throw new Error(
+          `harvested checkpoint missing baseline(s): ${missing.join(", ")}; re-run research so harvest checkpoints include docs/evidence/cluster baselines`,
+        );
       }
+      knownClusterIds = new Set(clusterBaseline);
       stopReason = await finishIntelligenceAndRound({
         queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
-        docsBefore: lastCheckpoint.docsBefore,
-        evidenceBefore: lastCheckpoint.evidenceBefore,
+        docsBefore,
+        evidenceBefore,
         countAttempt: false,
       });
       continue;
@@ -335,7 +354,11 @@ export async function runBroadResearchRounds(input: {
     queries = applyQueryExecutionWriteback(queries, allStatuses, executedIds);
     executedQueryCount += selection.toRun.length;
     // Checkpoint A: query writeback + harvest baselines before intelligence so crash mid-intel is resumable.
-    persistAtomic("continue", "harvested", roundNumber, { docsBefore, evidenceBefore });
+    persistAtomic("continue", "harvested", roundNumber, {
+      docsBefore,
+      evidenceBefore,
+      knownClusterIds: [...knownClusterIds],
+    });
 
     stopReason = await finishIntelligenceAndRound({
       queryIds: selection.toRun.map((query) => query.id),

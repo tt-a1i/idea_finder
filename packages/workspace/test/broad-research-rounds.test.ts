@@ -411,7 +411,7 @@ describe("runBroadResearchRounds", () => {
           fetchMethod: "api",
           fetchAgentRunId: null,
           contentType: "post",
-          rawBody: "Monday standup notes get lost between coding agents",
+          rawBody: "This workflow is painful every day between coding agents",
           retentionClass: "research",
           legalBasis: "public",
         } as never;
@@ -451,7 +451,13 @@ describe("runBroadResearchRounds", () => {
 
     const midConfig = storage.researchRunConfigs.get(runId) as {
       researchLedger?: {
-        lastCheckpoint?: { phase: string; round: number; docsBefore?: number; evidenceBefore?: number };
+        lastCheckpoint?: {
+          phase: string;
+          round: number;
+          docsBefore?: number;
+          evidenceBefore?: number;
+          knownClusterIds?: readonly string[];
+        };
         stopReason: string;
       };
     };
@@ -459,12 +465,20 @@ describe("runBroadResearchRounds", () => {
     expect(checkpoint?.phase).toBe("harvested");
     expect(checkpoint?.docsBefore).toBe(0);
     expect(checkpoint?.evidenceBefore).toBe(0);
+    expect(checkpoint?.knownClusterIds).toEqual([]);
     const midPlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
     expect(midPlan.queries.some((query) => query.status === "success")).toBe(true);
     const docsAfterHarvest = storage.rawDocuments.listByRun(runId).length;
     const evidenceAfterHarvest = storage.evidenceItems.listByRun(runId).length;
+    const signalsAfterHarvest = storage.rawSignals.listByRun(runId);
     expect(docsAfterHarvest).toBeGreaterThan(checkpoint!.docsBefore!);
     expect(evidenceAfterHarvest).toBe(checkpoint!.evidenceBefore!);
+    expect(signalsAfterHarvest.length).toBeGreaterThan(0);
+    const clustersIfWrongBaseline = clusterPainSignals({
+      signals: signalsAfterHarvest,
+      independenceGroupByDocumentId: new Map(),
+    });
+    expect(clustersIfWrongBaseline.length).toBeGreaterThan(0);
     const harvestAfterCrash = harvestCalls;
 
     const resumed = await runBroadResearchRounds({
@@ -489,7 +503,183 @@ describe("runBroadResearchRounds", () => {
     expect(round1!.newEvidenceCount).toBe(evidenceFinal - checkpoint!.evidenceBefore!);
     expect(round1!.newDocumentCount).toBe(docsAfterHarvest - checkpoint!.docsBefore!);
     expect(round1!.newDocumentCount).toBeGreaterThan(0);
+    expect(round1!.newClusterCount).toBeGreaterThan(0);
+    expect(round1!.newClusterCount).toBe(
+      countNewClusters(new Set(checkpoint!.knownClusterIds ?? []), clustersIfWrongBaseline),
+    );
+    expect(resumed.ledger.stopReason).not.toBe("saturated");
     storage.close();
+  });
+
+  it("crash/resume newClusterCount matches clean run and does not false-saturate", async () => {
+    const painBody = "This workflow is painful every day between coding agents";
+
+    async function runOnce(mode: "clean" | "crash-resume") {
+      const root = await mkdtemp(path.join(os.tmpdir(), `idea-finder-cluster-${mode}-`));
+      leftovers.push(root);
+      const dataDir = path.join(root, "pipeline");
+      const storage = openLocalStorage({ dataDir });
+      const proposed = buildProposedSearchPlan({
+        topic: "agent handoff pain",
+        budgets: { queries: 4, documents: 50, rounds: 3 },
+        sourceFamilies: ["hn", "stack_exchange"],
+      });
+      const round1Done = buildBroadQueryVariants(proposed).slice(0, 1).map((query) => ({
+        ...query,
+        round: 1,
+        status: "success" as const,
+        itemCount: 1,
+      }));
+      const round2Pending = buildBroadQueryVariants(proposed).slice(1, 2).map((query) => ({
+        ...query,
+        id: `${query.id}_r2`,
+        round: 2,
+        status: "pending" as const,
+        itemCount: 0,
+      }));
+      const confirmed = confirmSearchPlanEntity({
+        ...proposed,
+        queries: [...round1Done, ...round2Pending],
+        budgets: { queries: 4, documents: 50, rounds: 3 },
+      });
+      const brief: HuntingBrief = {
+        id: asId(`task_cluster_${mode}`),
+        slug: `cluster_${mode}`,
+        title: "agent handoff pain",
+        description: "test",
+        lenses: ["pain"],
+        sourcesEnabled: ["hn", "stack_exchange"],
+        successCriteria: "s",
+        createdAt: "2026-07-11T00:00:00.000Z",
+        searchPlanId: confirmed.id,
+        searchPlanVersion: confirmed.version,
+        queryPlan: { harvestMode: "l0" },
+      };
+      storage.searchPlans.save(confirmed as { readonly id: string });
+      storage.huntingBriefs.save(brief);
+      const runId = asId(`run_cluster_${mode}`);
+      storage.researchRuns.save({
+        id: runId,
+        huntingTaskId: brief.id,
+        status: "running",
+        startedAt: "2026-07-11T00:00:00.000Z",
+        completedAt: null,
+        configHash: "cfg_test",
+        errorMessage: null,
+      });
+      // Prior round reported zero new clusters — a false zero on resume would trip saturated.
+      storage.researchRunConfigs.save({
+        id: runId,
+        effectiveConfig: { mode: "test" },
+        execution: "resumed",
+        researchLedger: {
+          rounds: [{
+            round: 1,
+            queryIds: round1Done.map((query) => query.id),
+            newDocumentCount: 1,
+            newEvidenceCount: 1,
+            newClusterCount: 0,
+            coverageIncomplete: false,
+          }],
+          stopReason: "continue",
+        },
+      });
+
+      let harvestCalls = 0;
+      const connector = (platform: string): SourceConnector => ({
+        platform,
+        async healthcheck() { return { ok: true }; },
+        async *search() {
+          harvestCalls += 1;
+          yield {
+            id: asId(`doc_${platform}_${mode}_${harvestCalls}`),
+            huntingTaskId: brief.id,
+            sourceTier: "public_api",
+            platform,
+            externalId: `${platform}_${mode}_${harvestCalls}`,
+            url: `https://example.test/${platform}/${mode}/${harvestCalls}`,
+            fetchedAt: "2026-07-11T00:00:00.000Z",
+            fetchMethod: "api",
+            fetchAgentRunId: null,
+            contentType: "post",
+            rawBody: painBody,
+            retentionClass: "research",
+            legalBasis: "public",
+          } as never;
+        },
+        async fetch() { throw new Error("not used"); },
+      });
+      const harvest = createHarvestPipeline({
+        connectors: [connector("hn"), connector("stack_exchange")],
+        repository: createStorageHarvestRepository(storage),
+      });
+      const realIntel = createIntelligencePipeline({
+        documents: storage.rawDocuments,
+        chunks: storage.chunks,
+        signals: storage.rawSignals,
+        evidence: storage.evidenceItems,
+        drafts: storage.opportunityDrafts,
+      });
+      let intelCalls = 0;
+      const intelligence = {
+        run: async (run: Parameters<typeof realIntel.run>[0], opts?: Parameters<typeof realIntel.run>[1]) => {
+          intelCalls += 1;
+          if (mode === "crash-resume" && intelCalls === 1) throw new Error("intelligence crashed");
+          return realIntel.run(run, opts);
+        },
+      };
+
+      const deps = { storage, harvest, intelligence, queryTermsFromBrief };
+      if (mode === "crash-resume") {
+        await expect(runBroadResearchRounds({
+          deps,
+          brief,
+          runId,
+          plan: confirmed,
+          execution: "resumed",
+          effectiveConfig: { mode: "test" },
+        })).rejects.toThrow("intelligence crashed");
+        const midConfig = storage.researchRunConfigs.get(runId) as {
+          researchLedger?: {
+            lastCheckpoint?: { knownClusterIds?: readonly string[]; phase: string };
+          };
+        };
+        expect(midConfig.researchLedger?.lastCheckpoint?.phase).toBe("harvested");
+        expect(midConfig.researchLedger?.lastCheckpoint?.knownClusterIds).toEqual([]);
+        const midPlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+        const result = await runBroadResearchRounds({
+          deps,
+          brief,
+          runId,
+          plan: midPlan,
+          execution: "resumed",
+          effectiveConfig: { mode: "test" },
+          existingLedger: midConfig.researchLedger as never,
+        });
+        storage.close();
+        return result;
+      }
+
+      const result = await runBroadResearchRounds({
+        deps,
+        brief,
+        runId,
+        plan: confirmed,
+        execution: "resumed",
+        effectiveConfig: { mode: "test" },
+      });
+      storage.close();
+      return result;
+    }
+
+    const clean = await runOnce("clean");
+    const resumed = await runOnce("crash-resume");
+    const cleanRound2 = clean.ledger.rounds.find((round) => round.round === 2);
+    const resumedRound2 = resumed.ledger.rounds.find((round) => round.round === 2);
+    expect(cleanRound2?.newClusterCount).toBeGreaterThan(0);
+    expect(resumedRound2?.newClusterCount).toBe(cleanRound2!.newClusterCount);
+    expect(resumed.ledger.stopReason).not.toBe("saturated");
+    expect(clean.ledger.stopReason).not.toBe("saturated");
   });
 
   it("atomically rolls back SearchPlan and ledger when transaction save fails", async () => {

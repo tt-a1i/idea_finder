@@ -45,6 +45,8 @@ export interface ResearchLedger {
     readonly docsBefore?: number;
     /** Evidence count before this round's harvest; required when phase is harvested. */
     readonly evidenceBefore?: number;
+    /** Cluster ids known before this round's harvest; required when phase is harvested. */
+    readonly knownClusterIds?: readonly string[];
   };
 }
 
