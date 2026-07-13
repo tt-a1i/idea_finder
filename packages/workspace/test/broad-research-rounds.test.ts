@@ -64,6 +64,48 @@ describe("semantic pain clustering", () => {
     const forward = clusterPainSignals({ signals, independenceGroupByDocumentId: independence });
     const reverse = clusterPainSignals({ signals: [...signals].reverse(), independenceGroupByDocumentId: independence });
     expect(forward.map((cluster) => cluster.id).sort()).toEqual(reverse.map((cluster) => cluster.id).sort());
+    expect(forward).toHaveLength(reverse.length);
+    for (const cluster of forward) {
+      const match = reverse.find((item) => item.id === cluster.id);
+      expect(match?.evidenceIds.sort()).toEqual(cluster.evidenceIds.sort());
+    }
+  });
+
+  it("keeps cluster identity when a lexicographically smaller similar signal joins", () => {
+    const independence = new Map([["doc_a", "g1"], ["doc_b", "g1"]]);
+    const initial = clusterPainSignals({
+      signals: [{ id: "zzz_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_a" }],
+      independenceGroupByDocumentId: independence,
+    });
+    const expanded = clusterPainSignals({
+      signals: [
+        { id: "aaa_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow every week", documentId: "doc_b" },
+        { id: "zzz_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_a" },
+      ],
+      independenceGroupByDocumentId: independence,
+    });
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0]?.id).toBe(initial[0]?.id);
+    expect(countNewClusters(new Set(initial.map((cluster) => cluster.id)), expanded)).toBe(0);
+    expect(expanded[0]?.evidenceIds).toEqual(expect.arrayContaining(["aaa_signal", "zzz_signal"]));
+    expect(expanded[0]?.documentIds).toEqual(expect.arrayContaining(["doc_a", "doc_b"]));
+  });
+
+  it("still counts genuinely distinct pains as new clusters", () => {
+    const independence = new Map([["doc_a", "g1"], ["doc_b", "g2"]]);
+    const initial = clusterPainSignals({
+      signals: [{ id: "s1", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_a" }],
+      independenceGroupByDocumentId: independence,
+    });
+    const expanded = clusterPainSignals({
+      signals: [
+        { id: "s1", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_a" },
+        { id: "s2", signalType: "workaround", quoteVerbatim: "We paste deploy logs into a spreadsheet manually", documentId: "doc_b" },
+      ],
+      independenceGroupByDocumentId: independence,
+    });
+    expect(countNewClusters(new Set(initial.map((cluster) => cluster.id)), expanded)).toBe(1);
+    expect(expanded).toHaveLength(2);
   });
 });
 
@@ -680,6 +722,156 @@ describe("runBroadResearchRounds", () => {
     expect(resumedRound2?.newClusterCount).toBe(cleanRound2!.newClusterCount);
     expect(resumed.ledger.stopReason).not.toBe("saturated");
     expect(clean.ledger.stopReason).not.toBe("saturated");
+  });
+
+  it("preserves same-round newClusterCount across retry and avoids false saturation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-round-retry-cluster-"));
+    leftovers.push(root);
+    const dataDir = path.join(root, "pipeline");
+    const storage = openLocalStorage({ dataDir });
+    const proposed = buildProposedSearchPlan({
+      topic: "agent handoff pain",
+      budgets: { queries: 4, documents: 50, rounds: 3 },
+      sourceFamilies: ["hn", "stack_exchange"],
+    });
+    const round1Done = buildBroadQueryVariants(proposed).slice(0, 1).map((query) => ({
+      ...query,
+      round: 1,
+      status: "success" as const,
+      itemCount: 1,
+    }));
+    const round2Pending = buildBroadQueryVariants(proposed).slice(1, 2).map((query) => ({
+      ...query,
+      id: `${query.id}_r2`,
+      round: 2,
+      status: "pending" as const,
+      itemCount: 0,
+    }));
+    const confirmed = confirmSearchPlanEntity({
+      ...proposed,
+      queries: [...round1Done, ...round2Pending],
+      budgets: { queries: 4, documents: 50, rounds: 3 },
+    });
+    const brief: HuntingBrief = {
+      id: asId("task_round_retry_cluster"),
+      slug: "round_retry_cluster",
+      title: "agent handoff pain",
+      description: "test",
+      lenses: ["pain"],
+      sourcesEnabled: ["hn", "stack_exchange"],
+      successCriteria: "s",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      searchPlanId: confirmed.id,
+      searchPlanVersion: confirmed.version,
+      queryPlan: { harvestMode: "l0" },
+    };
+    storage.searchPlans.save(confirmed as { readonly id: string });
+    storage.huntingBriefs.save(brief);
+    const runId = asId("run_round_retry_cluster");
+    storage.researchRuns.save({
+      id: runId,
+      huntingTaskId: brief.id,
+      status: "running",
+      startedAt: "2026-07-11T00:00:00.000Z",
+      completedAt: null,
+      configHash: "cfg_test",
+      errorMessage: null,
+    });
+    storage.researchRunConfigs.save({
+      id: runId,
+      effectiveConfig: { mode: "test" },
+      execution: "resumed",
+      researchLedger: {
+        rounds: [{
+          round: 1,
+          queryIds: round1Done.map((query) => query.id),
+          newDocumentCount: 1,
+          newEvidenceCount: 1,
+          newClusterCount: 0,
+          coverageIncomplete: false,
+        }],
+        stopReason: "continue",
+      },
+    });
+
+    const painBody = "This workflow is painful every day between coding agents";
+    const connector = (platform: string): SourceConnector => ({
+      platform,
+      async healthcheck() { return { ok: true }; },
+      async *search() {
+        yield {
+          id: asId(`doc_${platform}_retry_cluster`),
+          huntingTaskId: brief.id,
+          sourceTier: "public_api",
+          platform,
+          externalId: `${platform}_retry_cluster`,
+          url: `https://example.test/${platform}/retry_cluster`,
+          fetchedAt: "2026-07-11T00:00:00.000Z",
+          fetchMethod: "api",
+          fetchAgentRunId: null,
+          contentType: "post",
+          rawBody: painBody,
+          retentionClass: "research",
+          legalBasis: "public",
+        } as never;
+      },
+      async fetch() { throw new Error("not used"); },
+    });
+    const deps = {
+      storage,
+      harvest: createHarvestPipeline({
+        connectors: [connector("hn"), connector("stack_exchange")],
+        repository: createStorageHarvestRepository(storage),
+      }),
+      intelligence: createIntelligencePipeline({
+        documents: storage.rawDocuments,
+        chunks: storage.chunks,
+        signals: storage.rawSignals,
+        evidence: storage.evidenceItems,
+        drafts: storage.opportunityDrafts,
+      }),
+      queryTermsFromBrief,
+    };
+
+    const first = await runBroadResearchRounds({
+      deps,
+      brief,
+      runId,
+      plan: confirmed,
+      execution: "resumed",
+      effectiveConfig: { mode: "test" },
+    });
+    const round2AfterFirst = first.ledger.rounds.find((round) => round.round === 2);
+    expect(round2AfterFirst?.newClusterCount).toBeGreaterThan(0);
+
+    const planAfterFirst = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+    const retryPlan = {
+      ...planAfterFirst,
+      queries: planAfterFirst.queries.map((query) => (
+        query.round === 2
+          ? { ...query, status: "partial" as const, error: "forced retry" }
+          : query
+      )),
+    };
+    storage.searchPlans.save(retryPlan as { readonly id: string });
+
+    const second = await runBroadResearchRounds({
+      deps,
+      brief,
+      runId,
+      plan: retryPlan,
+      execution: "retried",
+      effectiveConfig: { mode: "test" },
+      existingLedger: first.ledger,
+    });
+
+    const round2AfterRetry = second.ledger.rounds.find((round) => round.round === 2);
+    expect(round2AfterRetry?.newClusterCount).toBe(round2AfterFirst?.newClusterCount);
+    expect(round2AfterRetry?.newDocumentCount).toBeGreaterThanOrEqual(round2AfterFirst?.newDocumentCount ?? 0);
+    expect(round2AfterRetry?.newEvidenceCount).toBeGreaterThanOrEqual(round2AfterFirst?.newEvidenceCount ?? 0);
+    expect(second.ledger.stopReason).not.toBe("saturated");
+    expect(second.coverageIncomplete).toBe(false);
+    storage.close();
   });
 
   it("atomically rolls back SearchPlan and ledger when transaction save fails", async () => {

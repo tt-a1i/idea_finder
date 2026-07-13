@@ -71,7 +71,7 @@ function stableClusterId(tokens: readonly string[]): string {
   return `cluster_${createHash("sha256").update(canonical || "empty").digest("hex").slice(0, 12)}`;
 }
 
-/** Lexical pain clustering: merge similar quotes; order-stable ids via sorted token union. */
+/** Lexical pain clustering: merge similar quotes; ids from shared token cores so later similar members do not churn identity. */
 export function clusterPainSignals(input: {
   readonly signals: readonly {
     readonly id: string;
@@ -96,32 +96,42 @@ export function clusterPainSignals(input: {
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((signal) => ({ ...signal, tokens: significantTokens(signal.quoteVerbatim) }));
 
-  const groups: Member[][] = [];
+  type Group = { readonly anchor: Member; readonly members: Member[] };
+  const groups: Group[] = [];
   for (const member of members) {
     let bestIndex = -1;
     let bestScore = 0;
     for (let i = 0; i < groups.length; i += 1) {
       const group = groups[i]!;
-      const score = Math.max(...group.map((other) => jaccard(member.tokens, other.tokens)));
+      const score = Math.max(...group.members.map((other) => jaccard(member.tokens, other.tokens)));
       if (score >= threshold && score > bestScore) {
         bestScore = score;
         bestIndex = i;
       }
     }
-    if (bestIndex >= 0) groups[bestIndex]!.push(member);
-    else groups.push([member]);
+    if (bestIndex >= 0) groups[bestIndex]!.members.push(member);
+    else groups.push({ anchor: member, members: [member] });
   }
 
   return groups
     .map((group) => {
-      const sorted = [...group].sort((a, b) => a.id.localeCompare(b.id));
+      const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
       const documentIds = [...new Set(sorted.map((item) => item.documentId))];
       const groupsIndep = new Set(documentIds.map((id) => input.independenceGroupByDocumentId.get(id) ?? id));
       const statement = [...sorted].sort((a, b) => b.quoteVerbatim.length - a.quoteVerbatim.length || a.id.localeCompare(b.id))[0]!.quoteVerbatim.slice(0, 180);
-      // Anchor id on the earliest member so later merges do not churn the cluster identity.
-      const anchorTokens = sorted[0]!.tokens.length > 0 ? sorted[0]!.tokens : [statement];
+      const tokenSets = sorted.map((item) => item.tokens);
+      let canonicalTokens = [...(tokenSets[0] ?? [])];
+      for (let i = 1; i < tokenSets.length; i += 1) {
+        const tokenSet = new Set(tokenSets[i]);
+        canonicalTokens = canonicalTokens.filter((token) => tokenSet.has(token));
+      }
+      if (canonicalTokens.length === 0) {
+        canonicalTokens = group.anchor.tokens.length > 0
+          ? [...group.anchor.tokens]
+          : [statement];
+      }
       return {
-        id: stableClusterId(anchorTokens),
+        id: stableClusterId(canonicalTokens),
         painStatement: statement,
         signalTypes: [...new Set(sorted.map((item) => item.signalType))],
         documentIds,

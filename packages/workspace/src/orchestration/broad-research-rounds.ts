@@ -92,16 +92,24 @@ export function recomputeCoverageIncomplete(
   });
 }
 
-function upsertRoundSummary(rounds: ResearchRoundSummary[], summary: ResearchRoundSummary): void {
+function upsertRoundSummary(
+  rounds: ResearchRoundSummary[],
+  summary: ResearchRoundSummary,
+  queries: readonly SearchQueryVariant[],
+  sourceStatuses: readonly SourceStatusRow[],
+): void {
   const existingIndex = rounds.findIndex((round) => round.round === summary.round);
   if (existingIndex >= 0) {
     const prior = rounds[existingIndex]!;
+    const mergedQueryIds = [...new Set([...prior.queryIds, ...summary.queryIds])];
+    const roundQueries = queries.filter((query) => mergedQueryIds.includes(query.id));
     rounds[existingIndex] = {
-      ...summary,
-      queryIds: [...new Set([...prior.queryIds, ...summary.queryIds])],
+      round: summary.round,
+      queryIds: mergedQueryIds,
       newDocumentCount: prior.newDocumentCount + summary.newDocumentCount,
       newEvidenceCount: prior.newEvidenceCount + summary.newEvidenceCount,
-      coverageIncomplete: prior.coverageIncomplete || summary.coverageIncomplete,
+      newClusterCount: Math.max(prior.newClusterCount, summary.newClusterCount),
+      coverageIncomplete: recomputeCoverageIncomplete(roundQueries, sourceStatuses),
     };
   } else {
     rounds.push(summary);
@@ -218,7 +226,7 @@ export async function runBroadResearchRounds(input: {
       newEvidenceCount: Math.max(0, evidenceCount - inputRound.evidenceBefore),
       newClusterCount,
       coverageIncomplete: roundIncomplete,
-    });
+    }, queries, allStatuses);
 
     let nextStop = evaluateStopCondition({
       rounds,
