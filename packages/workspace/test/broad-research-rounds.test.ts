@@ -241,25 +241,33 @@ describe("runBroadResearchRounds", () => {
     storage.close();
   });
 
-  it("retries failed queries without wiping prior round history", async () => {
+  it("retries failed queries: increases attempts, recovers success, skips prior success legs", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-retry-"));
     leftovers.push(root);
     const { storage, confirmed, brief, runId } = await setup(root, 2);
 
-    let attempts = 0;
-    const flaky: SourceConnector = {
+    let hnInvocations = 0;
+    let seInvocations = 0;
+    const firstQueryId = confirmed.queries[0]!.id;
+    const commentAttempts = new Map<string, number>();
+    const hn: SourceConnector = {
       platform: "hn",
       async healthcheck() { return { ok: true }; },
       async *search(query) {
-        attempts += 1;
-        if (attempts === 1) throw new Error("network unavailable");
+        hnInvocations += 1;
+        const qid = query.queryId ?? "";
+        if (qid === `${firstQueryId}__comment`) {
+          const n = (commentAttempts.get(qid) ?? 0) + 1;
+          commentAttempts.set(qid, n);
+          if (n === 1) throw new Error("network unavailable");
+        }
         yield {
-          id: asId(`doc_retry_${attempts}`),
+          id: asId(`doc_hn_${hnInvocations}`),
           huntingTaskId: brief.id,
           sourceTier: "public_api",
           platform: "hn",
-          externalId: `ext_${attempts}`,
-          url: `https://example.test/hn/${attempts}`,
+          externalId: `hn_${hnInvocations}`,
+          url: `https://example.test/hn/${hnInvocations}`,
           fetchedAt: "2026-07-11T00:00:00.000Z",
           fetchMethod: "api",
           fetchAgentRunId: null,
@@ -268,7 +276,6 @@ describe("runBroadResearchRounds", () => {
           retentionClass: "research",
           legalBasis: "public",
         } as never;
-        void query;
       },
       async fetch() { throw new Error("not used"); },
     };
@@ -276,13 +283,14 @@ describe("runBroadResearchRounds", () => {
       platform: "stack_exchange",
       async healthcheck() { return { ok: true }; },
       async *search() {
+        seInvocations += 1;
         yield {
-          id: asId("doc_se_ok"),
+          id: asId(`doc_se_${seInvocations}`),
           huntingTaskId: brief.id,
           sourceTier: "public_api",
           platform: "stack_exchange",
-          externalId: "se1",
-          url: "https://example.test/se/1",
+          externalId: `se_${seInvocations}`,
+          url: `https://example.test/se/${seInvocations}`,
           fetchedAt: "2026-07-11T00:00:00.000Z",
           fetchMethod: "api",
           fetchAgentRunId: null,
@@ -296,7 +304,7 @@ describe("runBroadResearchRounds", () => {
     };
 
     const harvestRepo = createStorageHarvestRepository(storage);
-    const harvest = createHarvestPipeline({ connectors: [flaky, se], repository: harvestRepo });
+    const harvest = createHarvestPipeline({ connectors: [hn, se], repository: harvestRepo });
     const intelligence = createIntelligencePipeline({
       documents: storage.rawDocuments,
       chunks: storage.chunks,
@@ -315,35 +323,217 @@ describe("runBroadResearchRounds", () => {
     });
     const priorRounds = first.ledger.rounds.length;
     expect(priorRounds).toBeGreaterThanOrEqual(1);
+    const hnAfterFirst = hnInvocations;
+    const seAfterFirst = seInvocations;
 
     const planAfter = storage.searchPlans.get(confirmed.id) as typeof confirmed;
-    const failed = planAfter.queries.filter((query) => query.status === "failure" || query.status === "partial");
-    // Force at least one failure if all somehow succeeded: mark first query failure for resume.
-    const planForRetry = {
-      ...planAfter,
-      queries: planAfter.queries.map((query, index) => (
-        index === 0 && query.status === "success"
-          ? { ...query, status: "failure" as const, error: "forced retry" }
-          : query
-      )),
-    };
-    storage.searchPlans.save(planForRetry as { readonly id: string });
+    const partialOrFailed = planAfter.queries.filter((query) => query.status === "failure" || query.status === "partial");
+    expect(partialOrFailed.length).toBeGreaterThan(0);
+
+    // Terminal stop from first run must not block retry.
+    expect(["budget_exhausted", "budget_exhausted_partial", "saturated"]).toContain(first.ledger.stopReason);
 
     const second = await runBroadResearchRounds({
       deps: { storage, harvest, intelligence, queryTermsFromBrief },
       brief,
       runId,
-      plan: planForRetry,
+      plan: planAfter,
       execution: "retried",
       effectiveConfig: { mode: "test" },
       existingLedger: first.ledger,
     });
 
+    expect(hnInvocations).toBeGreaterThan(hnAfterFirst);
+    expect(seInvocations).toBe(seAfterFirst); // success SE legs not re-run
     expect(second.ledger.rounds.length).toBeGreaterThanOrEqual(priorRounds);
     expect(second.ledger.rounds[0]?.round).toBe(1);
-    const stillPendingAll = second.queries.every((query) => query.status === "pending");
-    expect(stillPendingAll).toBe(false);
-    void failed;
+    const recovered = second.queries.find((query) => query.id === confirmed.queries[0]!.id);
+    expect(recovered?.status).toBe("success");
+    expect(second.coverageIncomplete).toBe(false);
+    expect(second.ledger.stopReason).not.toBe("budget_exhausted_partial");
+    storage.close();
+  });
+
+  it("persists harvested checkpoint before intelligence and resumes without re-harvest", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-intel-crash-"));
+    leftovers.push(root);
+    const dataDir = path.join(root, "pipeline");
+    const storage = openLocalStorage({ dataDir });
+    const proposed = buildProposedSearchPlan({
+      topic: "agent handoff pain",
+      budgets: { queries: 2, documents: 50, rounds: 1 },
+      sourceFamilies: ["hn", "stack_exchange"],
+    });
+    const confirmed = confirmSearchPlanEntity({
+      ...proposed,
+      queries: buildBroadQueryVariants(proposed).slice(0, 2),
+    });
+    const brief: HuntingBrief = {
+      id: asId("task_intel"),
+      slug: "intel",
+      title: "agent handoff pain",
+      description: "test",
+      lenses: ["pain"],
+      sourcesEnabled: ["hn", "stack_exchange"],
+      successCriteria: "s",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      searchPlanId: confirmed.id,
+      searchPlanVersion: confirmed.version,
+      queryPlan: { harvestMode: "l0" },
+    };
+    storage.searchPlans.save(confirmed as { readonly id: string });
+    storage.huntingBriefs.save(brief);
+    const runId = asId("run_intel_crash");
+    storage.researchRuns.save({
+      id: runId,
+      huntingTaskId: brief.id,
+      status: "running",
+      startedAt: "2026-07-11T00:00:00.000Z",
+      completedAt: null,
+      configHash: "cfg_test",
+      errorMessage: null,
+    });
+
+    let harvestCalls = 0;
+    const connector = (platform: string): SourceConnector => ({
+      platform,
+      async healthcheck() { return { ok: true }; },
+      async *search() {
+        harvestCalls += 1;
+        yield {
+          id: asId(`doc_${platform}_${harvestCalls}`),
+          huntingTaskId: brief.id,
+          sourceTier: "public_api",
+          platform,
+          externalId: `${platform}_${harvestCalls}`,
+          url: `https://example.test/${platform}/${harvestCalls}`,
+          fetchedAt: "2026-07-11T00:00:00.000Z",
+          fetchMethod: "api",
+          fetchAgentRunId: null,
+          contentType: "post",
+          rawBody: "Monday standup notes get lost between coding agents",
+          retentionClass: "research",
+          legalBasis: "public",
+        } as never;
+      },
+      async fetch() { throw new Error("not used"); },
+    });
+
+    const harvestRepo = createStorageHarvestRepository(storage);
+    const harvest = createHarvestPipeline({
+      connectors: [connector("hn"), connector("stack_exchange")],
+      repository: harvestRepo,
+    });
+    let intelCalls = 0;
+    const realIntel = createIntelligencePipeline({
+      documents: storage.rawDocuments,
+      chunks: storage.chunks,
+      signals: storage.rawSignals,
+      evidence: storage.evidenceItems,
+      drafts: storage.opportunityDrafts,
+    });
+    const intelligence = {
+      run: async (run: Parameters<typeof realIntel.run>[0], opts?: Parameters<typeof realIntel.run>[1]) => {
+        intelCalls += 1;
+        if (intelCalls === 1) throw new Error("intelligence crashed");
+        return realIntel.run(run, opts);
+      },
+    };
+
+    await expect(runBroadResearchRounds({
+      deps: { storage, harvest, intelligence, queryTermsFromBrief },
+      brief,
+      runId,
+      plan: confirmed,
+      execution: "new",
+      effectiveConfig: { mode: "test" },
+    })).rejects.toThrow("intelligence crashed");
+
+    const midConfig = storage.researchRunConfigs.get(runId) as { researchLedger?: { lastCheckpoint?: { phase: string; round: number }; stopReason: string } };
+    expect(midConfig.researchLedger?.lastCheckpoint?.phase).toBe("harvested");
+    const midPlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+    expect(midPlan.queries.some((query) => query.status === "success")).toBe(true);
+    const harvestAfterCrash = harvestCalls;
+
+    const resumed = await runBroadResearchRounds({
+      deps: { storage, harvest, intelligence, queryTermsFromBrief },
+      brief,
+      runId,
+      plan: midPlan,
+      execution: "resumed",
+      effectiveConfig: { mode: "test" },
+      existingLedger: midConfig.researchLedger as never,
+    });
+
+    expect(harvestCalls).toBe(harvestAfterCrash);
+    expect(intelCalls).toBeGreaterThanOrEqual(2);
+    expect(resumed.ledger.lastCheckpoint?.phase).toBe("round_complete");
+    expect(resumed.ledger.rounds.length).toBeGreaterThanOrEqual(1);
+    storage.close();
+  });
+
+  it("atomically rolls back SearchPlan and ledger when transaction save fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-tx-"));
+    leftovers.push(root);
+    const { storage, confirmed, brief, runId } = await setup(root, 2);
+
+    const connector = (platform: string): SourceConnector => ({
+      platform,
+      async healthcheck() { return { ok: true }; },
+      async *search() {
+        yield {
+          id: asId(`doc_${platform}_tx`),
+          huntingTaskId: brief.id,
+          sourceTier: "public_api",
+          platform,
+          externalId: `${platform}_tx`,
+          url: `https://example.test/${platform}/tx`,
+          fetchedAt: "2026-07-11T00:00:00.000Z",
+          fetchMethod: "api",
+          fetchAgentRunId: null,
+          contentType: "post",
+          rawBody: "painful handoff workflow",
+          retentionClass: "research",
+          legalBasis: "public",
+        } as never;
+      },
+      async fetch() { throw new Error("not used"); },
+    });
+    const harvest = createHarvestPipeline({
+      connectors: [connector("hn"), connector("stack_exchange")],
+      repository: createStorageHarvestRepository(storage),
+    });
+    const intelligence = createIntelligencePipeline({
+      documents: storage.rawDocuments,
+      chunks: storage.chunks,
+      signals: storage.rawSignals,
+      evidence: storage.evidenceItems,
+      drafts: storage.opportunityDrafts,
+    });
+
+    let saveCount = 0;
+    const originalSave = storage.researchRunConfigs.save.bind(storage.researchRunConfigs);
+    storage.researchRunConfigs.save = ((record: { readonly id: string }) => {
+      saveCount += 1;
+      if (saveCount === 1) throw new Error("forced config save failure");
+      return originalSave(record);
+    }) as typeof storage.researchRunConfigs.save;
+
+    const beforePlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+    await expect(runBroadResearchRounds({
+      deps: { storage, harvest, intelligence, queryTermsFromBrief },
+      brief,
+      runId,
+      plan: confirmed,
+      execution: "new",
+      effectiveConfig: { mode: "test" },
+    })).rejects.toThrow("forced config save failure");
+
+    const afterPlan = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+    // Transaction rollback: query statuses should remain pending (plan not partially committed).
+    expect(afterPlan.queries.every((query) => query.status === "pending")).toBe(true);
+    expect(afterPlan.queries.map((query) => query.id)).toEqual(beforePlan.queries.map((query) => query.id));
+    expect(storage.researchRunConfigs.get(runId)?.researchLedger).toBeUndefined();
     storage.close();
   });
 });

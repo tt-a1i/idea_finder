@@ -38,6 +38,10 @@ export interface ResearchRoundSummary {
 export interface ResearchLedger {
   readonly rounds: readonly ResearchRoundSummary[];
   readonly stopReason: ResearchStopReason;
+  readonly lastCheckpoint?: {
+    readonly round: number;
+    readonly phase: "harvested" | "round_complete";
+  };
 }
 
 export interface StoredResearchRunConfig {

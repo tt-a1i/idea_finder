@@ -37,6 +37,15 @@ export interface BroadResearchRoundResult {
   readonly coverageIncomplete: boolean;
 }
 
+type SourceStatusRow = {
+  readonly id?: string;
+  readonly requestKey?: string;
+  readonly status: string;
+  readonly itemCount: number;
+  readonly reason?: string | null;
+  readonly artifactIds?: readonly string[];
+};
+
 function independenceMap(storage: LocalStorage, runId: ResearchRunId): Map<string, string> {
   const records = storage.evidenceIndependence.listByRun(runId) as Array<{ documentId: string; independenceGroupId: string }>;
   return new Map(records.map((item) => [item.documentId, item.independenceGroupId]));
@@ -58,10 +67,45 @@ function mergeQueryLists(
 }
 
 function resolveStartRound(queries: readonly SearchQueryVariant[], existingRounds: readonly ResearchRoundSummary[]): number {
+  const retryableRounds = queries
+    .filter((query) => isRetryableQueryStatus(query.status))
+    .map((query) => query.round);
+  if (retryableRounds.length > 0) return Math.min(...retryableRounds);
   if (existingRounds.length === 0) return 1;
-  const maxRound = Math.max(...existingRounds.map((round) => round.round));
-  const retryableInMax = queries.some((query) => query.round === maxRound && isRetryableQueryStatus(query.status));
-  return retryableInMax ? maxRound : maxRound + 1;
+  return Math.max(...existingRounds.map((round) => round.round)) + 1;
+}
+
+function hasRetryableQueries(queries: readonly SearchQueryVariant[]): boolean {
+  return queries.some((query) => isRetryableQueryStatus(query.status));
+}
+
+/** Current unresolved failures only — historical attempt incompleteness must not permanently pollute. */
+export function recomputeCoverageIncomplete(
+  queries: readonly SearchQueryVariant[],
+  sourceStatuses: readonly SourceStatusRow[],
+): boolean {
+  if (queries.some((query) => query.status === "failure" || query.status === "partial")) return true;
+  return sourceStatuses.some((status) => {
+    const key = status.requestKey ?? status.id ?? "";
+    if (!key.startsWith("query:")) return false;
+    return status.status !== "success";
+  });
+}
+
+function upsertRoundSummary(rounds: ResearchRoundSummary[], summary: ResearchRoundSummary): void {
+  const existingIndex = rounds.findIndex((round) => round.round === summary.round);
+  if (existingIndex >= 0) {
+    const prior = rounds[existingIndex]!;
+    rounds[existingIndex] = {
+      ...summary,
+      queryIds: [...new Set([...prior.queryIds, ...summary.queryIds])],
+      newDocumentCount: prior.newDocumentCount + summary.newDocumentCount,
+      newEvidenceCount: prior.newEvidenceCount + summary.newEvidenceCount,
+      coverageIncomplete: prior.coverageIncomplete || summary.coverageIncomplete,
+    };
+  } else {
+    rounds.push(summary);
+  }
 }
 
 export async function runBroadResearchRounds(input: {
@@ -80,7 +124,7 @@ export async function runBroadResearchRounds(input: {
     ?? null;
 
   const rounds: ResearchRoundSummary[] = existingLedger ? [...existingLedger.rounds] : [];
-  let coverageIncomplete = existingLedger?.rounds.some((round) => round.coverageIncomplete) ?? false;
+  let lastCheckpoint = existingLedger?.lastCheckpoint;
 
   const signalsAtStart = deps.storage.rawSignals.listByRun(runId);
   const independenceAtStart = independenceMap(deps.storage, runId);
@@ -91,23 +135,109 @@ export async function runBroadResearchRounds(input: {
     }).map((cluster) => cluster.id),
   );
 
-  // Budget attempts: restore from ledger history; each new harvest attempt increments.
-  let executedQueryCount = existingLedger
-    ? existingLedger.rounds.reduce((sum, round) => sum + round.queryIds.length, 0)
-    : 0;
+  // Budget: count only successful/skipped queries; failed/partial retries get a fresh attempt slot.
+  let executedQueryCount = queries.filter((query) => query.status === "success" || query.status === "skipped").length;
 
   let documentCount = deps.storage.rawDocuments.listByRun(runId).length;
   let evidenceCount = deps.storage.evidenceItems.listByRun(runId).length;
-  let roundNumber = resolveStartRound(queries, rounds);
+  let roundNumber = lastCheckpoint?.phase === "harvested"
+    ? lastCheckpoint.round
+    : resolveStartRound(queries, rounds);
 
-  const persistState = (stopReason: ResearchStopReason) => {
-    deps.storage.searchPlans.save({ ...plan, queries, updatedAt: new Date().toISOString() } as { readonly id: string });
-    deps.storage.researchRunConfigs.save({
-      id: runId,
-      effectiveConfig,
-      execution,
-      researchLedger: { rounds, stopReason },
+  const sourceStatusesNow = () => deps.storage.sourceStatuses.listByRun(runId) as SourceStatusRow[];
+  let coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
+
+  const persistAtomic = (
+    stopReason: ResearchStopReason,
+    phase: "harvested" | "round_complete",
+    round: number,
+  ) => {
+    lastCheckpoint = { round, phase };
+    const ledger: ResearchLedger = {
+      rounds,
+      stopReason,
+      lastCheckpoint,
+    };
+    deps.storage.transaction(() => {
+      deps.storage.searchPlans.save({ ...plan, queries, updatedAt: new Date().toISOString() } as { readonly id: string });
+      deps.storage.researchRunConfigs.save({
+        id: runId,
+        effectiveConfig,
+        execution,
+        researchLedger: ledger,
+      });
     });
+  };
+
+  const finishIntelligenceAndRound = async (inputRound: {
+    readonly queryIds: readonly string[];
+    readonly docsBefore: number;
+    readonly evidenceBefore: number;
+    readonly countAttempt: boolean;
+  }) => {
+    await deps.intelligence.run(runId, { queryTerms: deps.queryTermsFromBrief(brief) });
+
+    documentCount = deps.storage.rawDocuments.listByRun(runId).length;
+    evidenceCount = deps.storage.evidenceItems.listByRun(runId).length;
+    const signals = deps.storage.rawSignals.listByRun(runId);
+    const independence = independenceMap(deps.storage, runId);
+    const clusters = clusterPainSignals({
+      signals,
+      independenceGroupByDocumentId: independence,
+    });
+    const newClusterCount = countNewClusters(knownClusterIds, clusters);
+    knownClusterIds = new Set(clusters.map((cluster) => cluster.id));
+
+    const roundIncomplete = inputRound.queryIds.some((id) => {
+      const updated = queries.find((item) => item.id === id);
+      return updated?.status !== "success";
+    });
+    const allStatuses = sourceStatusesNow();
+    coverageIncomplete = recomputeCoverageIncomplete(queries, allStatuses);
+
+    upsertRoundSummary(rounds, {
+      round: roundNumber,
+      queryIds: inputRound.queryIds,
+      newDocumentCount: Math.max(0, documentCount - inputRound.docsBefore),
+      newEvidenceCount: Math.max(0, evidenceCount - inputRound.evidenceBefore),
+      newClusterCount,
+      coverageIncomplete: roundIncomplete,
+    });
+
+    let nextStop = evaluateStopCondition({
+      rounds,
+      budgets: plan.budgets,
+      executedQueryCount,
+      documentCount,
+      coverageIncomplete,
+    });
+    persistAtomic(nextStop, "round_complete", roundNumber);
+
+    if (nextStop === "continue") {
+      const documentToQuery = buildDocumentToQueryIdMap(allStatuses);
+      const evidenceToQueryId = new Map<string, string>();
+      for (const signal of signals) {
+        const parent = documentToQuery.get(signal.documentId);
+        if (parent) evidenceToQueryId.set(signal.id, parent);
+      }
+      const followUps = generateFollowUpQueries({
+        plan,
+        round: roundNumber + 1,
+        clusters,
+        existingQueryTexts: new Set(queries.map((query) => query.queryText.toLowerCase())),
+        evidenceToQueryId,
+      });
+      if (followUps.length === 0) {
+        coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
+        nextStop = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
+        persistAtomic(nextStop, "round_complete", roundNumber);
+      } else {
+        queries = mergeQueryLists(queries, followUps);
+        persistAtomic(nextStop, "round_complete", roundNumber);
+        roundNumber += 1;
+      }
+    }
+    return nextStop;
   };
 
   let stopReason = evaluateStopCondition({
@@ -117,20 +247,35 @@ export async function runBroadResearchRounds(input: {
     documentCount,
     coverageIncomplete,
   });
-  persistState(stopReason);
+
+  // Retry/resume must not be blocked by a prior terminal stop when work remains.
+  if (hasRetryableQueries(queries) || lastCheckpoint?.phase === "harvested") {
+    stopReason = "continue";
+  }
 
   while (stopReason === "continue") {
+    // Resume after harvest checkpoint: skip harvest, finish intelligence for that round.
+    if (lastCheckpoint?.phase === "harvested" && lastCheckpoint.round === roundNumber) {
+      const queryIds = queries
+        .filter((query) => query.round === roundNumber && query.status !== "pending")
+        .map((query) => query.id);
+      const docsBefore = deps.storage.rawDocuments.listByRun(runId).length;
+      const evidenceBefore = deps.storage.evidenceItems.listByRun(runId).length;
+      stopReason = await finishIntelligenceAndRound({
+        queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
+        docsBefore,
+        evidenceBefore,
+        countAttempt: false,
+      });
+      continue;
+    }
+
     const retryableThisRound = queries.filter((query) => query.round === roundNumber && isRetryableQueryStatus(query.status));
     if (retryableThisRound.length === 0) {
       if (rounds.length === 0 && roundNumber === 1) break;
-      // Advance or stop via budget/saturation after appending divergence for next round.
-      if (roundNumber > (rounds[rounds.length - 1]?.round ?? 0)) {
-        stopReason = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
-        persistState(stopReason);
-        break;
-      }
+      coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
       stopReason = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
-      persistState(stopReason);
+      persistAtomic(stopReason, "round_complete", roundNumber);
       break;
     }
 
@@ -146,8 +291,9 @@ export async function runBroadResearchRounds(input: {
       if (selection.skipped.length > 0) {
         queries = markSkipped(queries, new Set(selection.skipped.map((query) => query.id)));
       }
+      coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
       stopReason = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
-      persistState(stopReason);
+      persistAtomic(stopReason, "round_complete", roundNumber);
       break;
     }
 
@@ -156,124 +302,56 @@ export async function runBroadResearchRounds(input: {
       queries = markSkipped(queries, new Set(selection.skipped.map((query) => query.id)));
     }
 
-    // Reset retryable queries to pending before harvest so writeback reflects this attempt.
     queries = queries.map((query) => (
       executedIds.has(query.id) && isRetryableQueryStatus(query.status)
         ? { ...query, status: "pending", error: null }
         : query
     ));
 
-    const queryPlan: QueryPlan = buildQueryPlanFromBrief(brief, brief.id, selection.toRun);
-    const priorStatuses = deps.storage.sourceStatuses.listByRun(runId) as Array<{ id: string; status: string }>;
-    const completedRequestKeys = new Set(
-      priorStatuses.filter((item) => item.status === "success").map((item) => item.id),
-    );
     const docsBefore = deps.storage.rawDocuments.listByRun(runId).length;
     const evidenceBefore = deps.storage.evidenceItems.listByRun(runId).length;
+
+    const queryPlan: QueryPlan = buildQueryPlanFromBrief(brief, brief.id, selection.toRun);
+    const priorStatuses = sourceStatusesNow();
+    const completedRequestKeys = new Set(
+      priorStatuses.filter((item) => item.status === "success").map((item) => item.id ?? item.requestKey ?? ""),
+    );
 
     const harvestResult = await deps.harvest.runHarvest(runId, queryPlan, { completedRequestKeys });
     for (const status of harvestResult.sourceExecutions) {
       deps.storage.sourceStatuses.save(runId, status);
     }
 
-    const allStatuses = deps.storage.sourceStatuses.listByRun(runId) as Array<{
-      id?: string;
-      requestKey?: string;
-      status: string;
-      itemCount: number;
-      reason?: string | null;
-      artifactIds?: readonly string[];
-    }>;
+    const allStatuses = sourceStatusesNow();
     queries = applyQueryExecutionWriteback(queries, allStatuses, executedIds);
     executedQueryCount += selection.toRun.length;
+    // Checkpoint A: query writeback before intelligence so crash mid-intel is resumable.
+    persistAtomic("continue", "harvested", roundNumber);
 
-    await deps.intelligence.run(runId, { queryTerms: deps.queryTermsFromBrief(brief) });
-
-    documentCount = deps.storage.rawDocuments.listByRun(runId).length;
-    evidenceCount = deps.storage.evidenceItems.listByRun(runId).length;
-    const signals = deps.storage.rawSignals.listByRun(runId);
-    const independence = independenceMap(deps.storage, runId);
-    const clusters = clusterPainSignals({
-      signals,
-      independenceGroupByDocumentId: independence,
-    });
-    const newClusterCount = countNewClusters(knownClusterIds, clusters);
-    knownClusterIds = new Set(clusters.map((cluster) => cluster.id));
-
-    const roundIncomplete = selection.toRun.some((query) => {
-      const updated = queries.find((item) => item.id === query.id);
-      return updated?.status !== "success";
-    });
-    coverageIncomplete = coverageIncomplete || roundIncomplete;
-
-    // Replace same-round summary on retry; otherwise append.
-    const roundSummary: ResearchRoundSummary = {
-      round: roundNumber,
+    stopReason = await finishIntelligenceAndRound({
       queryIds: selection.toRun.map((query) => query.id),
-      newDocumentCount: Math.max(0, documentCount - docsBefore),
-      newEvidenceCount: Math.max(0, evidenceCount - evidenceBefore),
-      newClusterCount,
-      coverageIncomplete: roundIncomplete,
-    };
-    const existingIndex = rounds.findIndex((round) => round.round === roundNumber);
-    if (existingIndex >= 0) {
-      const prior = rounds[existingIndex]!;
-      rounds[existingIndex] = {
-        ...roundSummary,
-        queryIds: [...new Set([...prior.queryIds, ...roundSummary.queryIds])],
-        newDocumentCount: prior.newDocumentCount + roundSummary.newDocumentCount,
-        newEvidenceCount: prior.newEvidenceCount + roundSummary.newEvidenceCount,
-        newClusterCount: prior.newClusterCount + roundSummary.newClusterCount,
-        coverageIncomplete: prior.coverageIncomplete || roundSummary.coverageIncomplete,
-      };
-    } else {
-      rounds.push(roundSummary);
-    }
-
-    stopReason = evaluateStopCondition({
-      rounds,
-      budgets: plan.budgets,
-      executedQueryCount,
-      documentCount,
-      coverageIncomplete,
+      docsBefore,
+      evidenceBefore,
+      countAttempt: true,
     });
-    persistState(stopReason);
-    if (stopReason !== "continue") break;
-
-    const documentToQuery = buildDocumentToQueryIdMap(allStatuses);
-    const evidenceToQueryId = new Map<string, string>();
-    for (const signal of signals) {
-      const parent = documentToQuery.get(signal.documentId);
-      if (parent) evidenceToQueryId.set(signal.id, parent);
-    }
-
-    const followUps = generateFollowUpQueries({
-      plan,
-      round: roundNumber + 1,
-      clusters,
-      existingQueryTexts: new Set(queries.map((query) => query.queryText.toLowerCase())),
-      evidenceToQueryId,
-    });
-    if (followUps.length === 0) {
-      stopReason = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
-      persistState(stopReason);
-      break;
-    }
-    queries = mergeQueryLists(queries, followUps);
-    persistState(stopReason);
-    roundNumber += 1;
   }
 
   if (stopReason === "continue") {
+    coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
     stopReason = coverageIncomplete ? "budget_exhausted_partial" : "budget_exhausted";
-    persistState(stopReason);
+    persistAtomic(stopReason, "round_complete", Math.max(roundNumber, rounds[rounds.length - 1]?.round ?? 1));
   }
 
+  coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
   deps.storage.pipelineSteps.markComplete(runId, "harvest");
   deps.storage.pipelineSteps.markComplete(runId, "intelligence");
 
   return {
-    ledger: { rounds, stopReason },
+    ledger: {
+      rounds,
+      stopReason,
+      lastCheckpoint,
+    },
     queries,
     coverageIncomplete,
   };
