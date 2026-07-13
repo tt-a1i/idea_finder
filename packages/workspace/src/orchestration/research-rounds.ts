@@ -66,12 +66,29 @@ function jaccard(a: readonly string[], b: readonly string[]): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+
+function resolveGroupClusterId(
+  group: { readonly anchor: { readonly tokens: readonly string[]; readonly quoteVerbatim: string }; readonly members: readonly { readonly id: string; readonly tokens: readonly string[]; readonly quoteVerbatim: string }[] },
+  previousClusters: readonly PainClusterSeed[] | undefined,
+): string {
+  const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
+  const evidenceIds = new Set(sorted.map((member) => member.id));
+  const inherited = previousClusters?.find((cluster) =>
+    cluster.evidenceIds.some((id) => evidenceIds.has(id)),
+  );
+  if (inherited) return inherited.id;
+  const canonicalTokens = group.anchor.tokens.length > 0
+    ? [...group.anchor.tokens]
+    : [sorted[0]!.quoteVerbatim];
+  return stableClusterId(canonicalTokens);
+}
+
 function stableClusterId(tokens: readonly string[]): string {
   const canonical = [...tokens].sort().join("|");
   return `cluster_${createHash("sha256").update(canonical || "empty").digest("hex").slice(0, 12)}`;
 }
 
-/** Lexical pain clustering: merge similar quotes; ids from shared token cores so later similar members do not churn identity. */
+/** Lexical pain clustering: merge similar quotes; reuse prior cluster ids via shared evidence when available. */
 export function clusterPainSignals(input: {
   readonly signals: readonly {
     readonly id: string;
@@ -82,6 +99,7 @@ export function clusterPainSignals(input: {
   readonly independenceGroupByDocumentId: ReadonlyMap<string, string>;
   readonly documentLanguages?: ReadonlyMap<string, string>;
   readonly similarityThreshold?: number;
+  readonly previousClusters?: readonly PainClusterSeed[];
 }): PainClusterSeed[] {
   const threshold = input.similarityThreshold ?? 0.35;
   type Member = {
@@ -119,19 +137,8 @@ export function clusterPainSignals(input: {
       const documentIds = [...new Set(sorted.map((item) => item.documentId))];
       const groupsIndep = new Set(documentIds.map((id) => input.independenceGroupByDocumentId.get(id) ?? id));
       const statement = [...sorted].sort((a, b) => b.quoteVerbatim.length - a.quoteVerbatim.length || a.id.localeCompare(b.id))[0]!.quoteVerbatim.slice(0, 180);
-      const tokenSets = sorted.map((item) => item.tokens);
-      let canonicalTokens = [...(tokenSets[0] ?? [])];
-      for (let i = 1; i < tokenSets.length; i += 1) {
-        const tokenSet = new Set(tokenSets[i]);
-        canonicalTokens = canonicalTokens.filter((token) => tokenSet.has(token));
-      }
-      if (canonicalTokens.length === 0) {
-        canonicalTokens = group.anchor.tokens.length > 0
-          ? [...group.anchor.tokens]
-          : [statement];
-      }
       return {
-        id: stableClusterId(canonicalTokens),
+        id: resolveGroupClusterId(group, input.previousClusters),
         painStatement: statement,
         signalTypes: [...new Set(sorted.map((item) => item.signalType))],
         documentIds,

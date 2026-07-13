@@ -50,6 +50,7 @@ describe("semantic pain clustering", () => {
         { id: "s2", signalType: "pain", quoteVerbatim: "painful handoff workflow every week", documentId: "doc_b" },
       ],
       independenceGroupByDocumentId: independence,
+      previousClusters: round1,
     });
     expect(countNewClusters(new Set(round1.map((cluster) => cluster.id)), round2)).toBe(0);
   });
@@ -83,12 +84,66 @@ describe("semantic pain clustering", () => {
         { id: "zzz_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_a" },
       ],
       independenceGroupByDocumentId: independence,
+      previousClusters: initial,
     });
     expect(expanded).toHaveLength(1);
     expect(expanded[0]?.id).toBe(initial[0]?.id);
     expect(countNewClusters(new Set(initial.map((cluster) => cluster.id)), expanded)).toBe(0);
     expect(expanded[0]?.evidenceIds).toEqual(expect.arrayContaining(["aaa_signal", "zzz_signal"]));
     expect(expanded[0]?.documentIds).toEqual(expect.arrayContaining(["doc_a", "doc_b"]));
+  });
+
+
+  it("keeps cluster identity when a longer quote existed before a shorter similar signal joins", () => {
+    const independence = new Map([["doc_a", "g1"], ["doc_b", "g1"]]);
+    const initial = clusterPainSignals({
+      signals: [{ id: "zzz_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow every week", documentId: "doc_a" }],
+      independenceGroupByDocumentId: independence,
+    });
+    const expanded = clusterPainSignals({
+      signals: [
+        { id: "aaa_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow", documentId: "doc_b" },
+        { id: "zzz_signal", signalType: "pain", quoteVerbatim: "painful handoff workflow every week", documentId: "doc_a" },
+      ],
+      independenceGroupByDocumentId: independence,
+      previousClusters: initial,
+    });
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0]?.id).toBe(initial[0]?.id);
+    expect(countNewClusters(new Set(initial.map((cluster) => cluster.id)), expanded)).toBe(0);
+  });
+
+  it("keeps cluster identity when a third similar signal joins", () => {
+    const independence = new Map([["doc_a", "g1"], ["doc_b", "g1"], ["doc_c", "g1"]]);
+    const quotes = [
+      "painful handoff workflow",
+      "painful handoff workflow every week",
+      "painful handoff workflow between coding agents",
+    ];
+    const round1 = clusterPainSignals({
+      signals: [{ id: "s1", signalType: "pain", quoteVerbatim: quotes[0]!, documentId: "doc_a" }],
+      independenceGroupByDocumentId: independence,
+    });
+    const round2 = clusterPainSignals({
+      signals: [
+        { id: "s1", signalType: "pain", quoteVerbatim: quotes[0]!, documentId: "doc_a" },
+        { id: "s2", signalType: "pain", quoteVerbatim: quotes[1]!, documentId: "doc_b" },
+      ],
+      independenceGroupByDocumentId: independence,
+      previousClusters: round1,
+    });
+    const round3 = clusterPainSignals({
+      signals: [
+        { id: "s1", signalType: "pain", quoteVerbatim: quotes[0]!, documentId: "doc_a" },
+        { id: "s2", signalType: "pain", quoteVerbatim: quotes[1]!, documentId: "doc_b" },
+        { id: "s3", signalType: "pain", quoteVerbatim: quotes[2]!, documentId: "doc_c" },
+      ],
+      independenceGroupByDocumentId: independence,
+      previousClusters: round2,
+    });
+    expect(round2[0]?.id).toBe(round1[0]?.id);
+    expect(round3[0]?.id).toBe(round1[0]?.id);
+    expect(countNewClusters(new Set(round2.map((cluster) => cluster.id)), round3)).toBe(0);
   });
 
   it("still counts genuinely distinct pains as new clusters", () => {
@@ -103,6 +158,7 @@ describe("semantic pain clustering", () => {
         { id: "s2", signalType: "workaround", quoteVerbatim: "We paste deploy logs into a spreadsheet manually", documentId: "doc_b" },
       ],
       independenceGroupByDocumentId: independence,
+      previousClusters: initial,
     });
     expect(countNewClusters(new Set(initial.map((cluster) => cluster.id)), expanded)).toBe(1);
     expect(expanded).toHaveLength(2);
@@ -963,5 +1019,29 @@ describe("evaluateStopCondition", () => {
       documentCount: 1,
       coverageIncomplete: false,
     })).toBe("saturated");
+  });
+});
+
+
+describe("recomputeCoverageIncomplete", () => {
+  it("ignores stale source failures outside the scoped round queries", async () => {
+    const { recomputeCoverageIncomplete } = await import("../src/orchestration/broad-research-rounds.js");
+    const round2Queries = [{
+      id: "q2",
+      queryText: "x",
+      language: "en",
+      source: "hn",
+      lens: "pain_failure",
+      round: 2,
+      status: "success" as const,
+      itemCount: 1,
+      error: null,
+    }];
+    const sourceStatuses = [
+      { id: "query:q1", requestKey: "query:q1", status: "failure", itemCount: 0 },
+      { id: "query:q2", requestKey: "query:q2", status: "success", itemCount: 1 },
+    ];
+    expect(recomputeCoverageIncomplete(round2Queries, sourceStatuses)).toBe(false);
+    expect(recomputeCoverageIncomplete([{ ...round2Queries[0]!, status: "partial" }], sourceStatuses)).toBe(true);
   });
 });

@@ -15,6 +15,7 @@ import type {
 import { buildQueryPlanFromBrief } from "./query-plan-builder.js";
 import {
   applyQueryExecutionWriteback,
+  baseSearchQueryId,
   buildDocumentToQueryIdMap,
   clusterPainSignals,
   countNewClusters,
@@ -22,6 +23,7 @@ import {
   generateFollowUpQueries,
   isRetryableQueryStatus,
   selectQueriesForRound,
+  type PainClusterSeed,
 } from "./research-rounds.js";
 
 export interface BroadResearchRoundDeps {
@@ -85,9 +87,13 @@ export function recomputeCoverageIncomplete(
   sourceStatuses: readonly SourceStatusRow[],
 ): boolean {
   if (queries.some((query) => query.status === "failure" || query.status === "partial")) return true;
+  const scopedIds = new Set(queries.map((query) => query.id));
   return sourceStatuses.some((status) => {
     const key = status.requestKey ?? status.id ?? "";
-    if (!key.startsWith("query:")) return false;
+    const match = /^query:(.+)$/.exec(key);
+    if (!match) return false;
+    const queryId = baseSearchQueryId(match[1]!);
+    if (!scopedIds.has(queryId)) return false;
     return status.status !== "success";
   });
 }
@@ -112,7 +118,11 @@ function upsertRoundSummary(
       coverageIncomplete: recomputeCoverageIncomplete(roundQueries, sourceStatuses),
     };
   } else {
-    rounds.push(summary);
+    const roundQueries = queries.filter((query) => summary.queryIds.includes(query.id));
+    rounds.push({
+      ...summary,
+      coverageIncomplete: recomputeCoverageIncomplete(roundQueries, sourceStatuses),
+    });
   }
 }
 
@@ -137,14 +147,17 @@ export async function runBroadResearchRounds(input: {
   const signalsAtStart = deps.storage.rawSignals.listByRun(runId);
   const independenceAtStart = independenceMap(deps.storage, runId);
   // Resume from harvested: harvest already persisted this round's signals — do not treat them as prior clusters.
-  let knownClusterIds = lastCheckpoint?.phase === "harvested" && lastCheckpoint.knownClusterIds !== undefined
-    ? new Set(lastCheckpoint.knownClusterIds)
-    : new Set(
-      clusterPainSignals({
-        signals: signalsAtStart,
-        independenceGroupByDocumentId: independenceAtStart,
-      }).map((cluster) => cluster.id),
-    );
+  const clustersAtStart = clusterPainSignals({
+    signals: signalsAtStart,
+    independenceGroupByDocumentId: independenceAtStart,
+  });
+  const harvestedBaselineIds = lastCheckpoint?.phase === "harvested"
+    ? lastCheckpoint.knownClusterIds
+    : undefined;
+  let knownClusters: PainClusterSeed[] = harvestedBaselineIds !== undefined
+    ? clustersAtStart.filter((cluster) => harvestedBaselineIds.includes(cluster.id))
+    : clustersAtStart;
+  let knownClusterIds = new Set(knownClusters.map((cluster) => cluster.id));
 
   // Budget: count only successful/skipped queries; failed/partial retries get a fresh attempt slot.
   let executedQueryCount = queries.filter((query) => query.status === "success" || query.status === "skipped").length;
@@ -208,8 +221,10 @@ export async function runBroadResearchRounds(input: {
     const clusters = clusterPainSignals({
       signals,
       independenceGroupByDocumentId: independence,
+      previousClusters: knownClusters,
     });
     const newClusterCount = countNewClusters(knownClusterIds, clusters);
+    knownClusters = clusters;
     knownClusterIds = new Set(clusters.map((cluster) => cluster.id));
 
     const roundIncomplete = inputRound.queryIds.some((id) => {
@@ -296,7 +311,8 @@ export async function runBroadResearchRounds(input: {
           `harvested checkpoint missing baseline(s): ${missing.join(", ")}; re-run research so harvest checkpoints include docs/evidence/cluster baselines`,
         );
       }
-      knownClusterIds = new Set(clusterBaseline);
+      knownClusters = clustersAtStart.filter((cluster) => clusterBaseline.includes(cluster.id));
+      knownClusterIds = new Set(knownClusters.map((cluster) => cluster.id));
       stopReason = await finishIntelligenceAndRound({
         queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
         docsBefore,
