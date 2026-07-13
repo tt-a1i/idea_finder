@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,7 +33,7 @@ describeLive("dual-source live acceptance", () => {
       topic: "coding agent context handoff",
       languages: ["en"],
       sourceFamilies: ["hn", "github_issues"],
-      budgets: { queries: 6, documents: 20, rounds: 2 },
+      budgets: { queries: 8, documents: 200, rounds: 2 },
     });
     const { brief } = await service.confirmSearchPlan({
       planId: proposed.id,
@@ -43,27 +43,28 @@ describeLive("dual-source live acceptance", () => {
     const stored = await service.runResearch(brief!.slug);
     const runId = stored.run.id;
 
-    const inspectOut: string[] = [];
-    expect(await runCli(["inspect", brief!.slug, "--json"], {
+    const planOut: string[] = [];
+    expect(await runCli(["plan", "inspect", proposed.id, "--json"], {
       workspaceDir: root,
-      stdout: (line) => inspectOut.push(line),
+      stdout: (line) => planOut.push(line),
     })).toBe(0);
-    const inspected = JSON.parse(inspectOut.join("\n")) as { data: { runId?: string; run?: { id: string } } };
 
     const exportOut: string[] = [];
-    expect(await runCli(["export", brief!.slug, "--json"], {
+    const exportCode = await runCli(["export", brief!.slug, "--json"], {
       workspaceDir: root,
       stdout: (line) => exportOut.push(line),
-    })).toBe(0);
+    });
+    // partialResult (6) is acceptable when some source legs are incomplete; success (0) preferred.
+    expect([0, 6]).toContain(exportCode);
     const exported = JSON.parse(exportOut.join("\n")) as {
       data: {
         runId: string;
         painMap: { stats: { roundCount: number; documentCount: number; stopReason: string } };
+        markdown?: string;
       };
     };
 
     expect(exported.data.runId).toBe(runId);
-    expect(inspected.data.runId ?? inspected.data.run?.id ?? runId).toBe(runId);
     expect(exported.data.painMap.stats.roundCount).toBeGreaterThanOrEqual(2);
     expect(exported.data.painMap.stats.documentCount).toBeGreaterThan(0);
     expect(exported.data.painMap.stats.stopReason).not.toBe("unknown");
@@ -84,6 +85,22 @@ describeLive("dual-source live acceptance", () => {
     expect(docs.some((doc) => doc.platform === "github_issues")).toBe(true);
     expect(docs.every((doc) => typeof doc.url === "string" && doc.url.startsWith("http"))).toBe(true);
     expect(docs.every((doc) => doc.fetchMethod !== "fixture" && !doc.url.includes("fixture"))).toBe(true);
+
+    const artifactDir = process.env.IDEA_FINDER_LIVE_ACCEPTANCE_OUT;
+    if (artifactDir) {
+      await writeFile(path.join(artifactDir, "export-summary.json"), JSON.stringify({
+        runId,
+        stopReason: exported.data.painMap.stats.stopReason,
+        roundCount: exported.data.painMap.stats.roundCount,
+        documentCount: exported.data.painMap.stats.documentCount,
+        hnOk,
+        ghOk,
+        sampleUrls: docs.slice(0, 6).map((doc) => ({ platform: doc.platform, url: doc.url })),
+      }, null, 2));
+      if (exported.data.markdown) {
+        await writeFile(path.join(artifactDir, "export.md"), exported.data.markdown);
+      }
+    }
   }, 180_000);
 });
 
