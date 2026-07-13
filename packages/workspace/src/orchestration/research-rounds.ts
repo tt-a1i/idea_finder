@@ -67,25 +67,197 @@ function jaccard(a: readonly string[], b: readonly string[]): number {
 }
 
 
-function resolveGroupClusterId(
-  group: { readonly anchor: { readonly tokens: readonly string[]; readonly quoteVerbatim: string }; readonly members: readonly { readonly id: string; readonly tokens: readonly string[]; readonly quoteVerbatim: string }[] },
+type ClusterGroup = {
+  readonly anchor: { readonly id: string; readonly tokens: readonly string[]; readonly quoteVerbatim: string };
+  readonly members: readonly { readonly id: string; readonly tokens: readonly string[]; readonly quoteVerbatim: string }[];
+};
+
+/**
+ * Maximum-weight bipartite matching (left→right), incomplete allowed.
+ * Uses successive shortest paths with Bellman–Ford; polynomial in |L|,|R|,|E|.
+ */
+function maxWeightBipartiteMatching(
+  leftCount: number,
+  rightCount: number,
+  edges: readonly { readonly left: number; readonly right: number; readonly weight: bigint }[],
+): (number | undefined)[] {
+  const adj: { right: number; weight: bigint }[][] = Array.from({ length: leftCount }, () => []);
+  for (const edge of edges) {
+    adj[edge.left]!.push({ right: edge.right, weight: edge.weight });
+  }
+  const mateL = new Array<number>(leftCount).fill(-1);
+  const mateR = new Array<number>(rightCount).fill(-1);
+  const edgeWeight = (left: number, right: number): bigint => {
+    for (const item of adj[left]!) {
+      if (item.right === right) return item.weight;
+    }
+    return 0n;
+  };
+
+  for (;;) {
+    const distL: (bigint | null)[] = Array.from({ length: leftCount }, () => null);
+    const distR: (bigint | null)[] = Array.from({ length: rightCount }, () => null);
+    const parentR = new Array<number>(rightCount).fill(-1);
+
+    for (let left = 0; left < leftCount; left += 1) {
+      if (mateL[left] === -1) distL[left] = 0n;
+    }
+
+    const nodeCount = leftCount + rightCount;
+    for (let iter = 0; iter < nodeCount; iter += 1) {
+      let changed = false;
+      for (let left = 0; left < leftCount; left += 1) {
+        const base = distL[left];
+        if (base === null) continue;
+        for (const { right, weight } of adj[left]!) {
+          if (mateL[left] === right) continue;
+          const next = base + weight;
+          if (distR[right] === null || next > distR[right]!) {
+            distR[right] = next;
+            parentR[right] = left;
+            changed = true;
+          }
+        }
+      }
+      for (let right = 0; right < rightCount; right += 1) {
+        const base = distR[right];
+        if (base === null) continue;
+        const left = mateR[right]!;
+        if (left < 0) continue;
+        const next = base - edgeWeight(left, right);
+        if (distL[left] === null || next > distL[left]!) {
+          distL[left] = next;
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+
+    let bestRight = -1;
+    let bestGain: bigint | null = null;
+    for (let right = 0; right < rightCount; right += 1) {
+      if (mateR[right] !== -1) continue;
+      const gain = distR[right];
+      if (gain === null) continue;
+      if (bestGain === null || gain > bestGain) {
+        bestGain = gain;
+        bestRight = right;
+      }
+    }
+    if (bestRight < 0 || bestGain === null || bestGain <= 0n) break;
+
+    let right = bestRight;
+    while (right >= 0) {
+      const left = parentR[right]!;
+      const prevRight = mateL[left]!;
+      mateL[left] = right;
+      mateR[right] = left;
+      right = prevRight;
+    }
+  }
+
+  return mateL.map((right) => (right >= 0 ? right : undefined));
+}
+
+/**
+ * Deterministic one-to-one inheritance via max-weight matching:
+ * 1) maximize inherited count, 2) maximize total overlap,
+ * 3) minimize (anchorId, prevId) pairs in anchorId order (includes prevId tie-break).
+ */
+function assignClusterIds(
+  groups: readonly ClusterGroup[],
   previousClusters: readonly PainClusterSeed[] | undefined,
-): string {
-  const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
-  const evidenceIds = new Set(sorted.map((member) => member.id));
-  const inherited = previousClusters?.find((cluster) =>
-    cluster.evidenceIds.some((id) => evidenceIds.has(id)),
+): string[] {
+  const previous = previousClusters ?? [];
+  type Edge = { groupIdx: number; prevIdx: number; prevId: string; overlap: number; anchorId: string };
+  const flatEdges: Edge[] = [];
+  for (let groupIdx = 0; groupIdx < groups.length; groupIdx += 1) {
+    const group = groups[groupIdx]!;
+    const evidenceIds = new Set(group.members.map((member) => member.id));
+    for (let prevIdx = 0; prevIdx < previous.length; prevIdx += 1) {
+      const prev = previous[prevIdx]!;
+      const overlap = prev.evidenceIds.filter((id) => evidenceIds.has(id)).length;
+      if (overlap > 0) {
+        flatEdges.push({
+          groupIdx,
+          prevIdx,
+          prevId: prev.id,
+          overlap,
+          anchorId: group.anchor.id,
+        });
+      }
+    }
+  }
+
+  flatEdges.sort(
+    (a, b) =>
+      a.anchorId.localeCompare(b.anchorId)
+      || a.prevId.localeCompare(b.prevId)
+      || a.groupIdx - b.groupIdx
+      || a.prevIdx - b.prevIdx,
   );
-  if (inherited) return inherited.id;
-  const canonicalTokens = group.anchor.tokens.length > 0
-    ? [...group.anchor.tokens]
-    : [sorted[0]!.quoteVerbatim];
-  return stableClusterId(canonicalTokens);
+
+  const edgeCount = flatEdges.length;
+  const maxOverlapSum = flatEdges.reduce((sum, edge) => sum + edge.overlap, 0);
+  // Lex uses one bit per ranked edge; overlap must dominate all lex bits; cardinality dominates overlap.
+  const lexBits = BigInt(Math.max(1, edgeCount));
+  const overlapUnit = 1n << lexBits;
+  const cardinalityUnit = overlapUnit * BigInt(maxOverlapSum + 1);
+
+  const weighted = flatEdges.map((edge, rank) => ({
+    left: edge.groupIdx,
+    right: edge.prevIdx,
+    // Larger bit for smaller (anchorId, prevId) rank → lex-smallest edge set among ties.
+    weight:
+      cardinalityUnit
+      + overlapUnit * BigInt(edge.overlap)
+      + (1n << BigInt(edgeCount - 1 - rank)),
+  }));
+
+  const mate = previous.length === 0 || groups.length === 0
+    ? groups.map(() => undefined)
+    : maxWeightBipartiteMatching(groups.length, previous.length, weighted);
+
+  const reserved = new Set<string>();
+  const ids: string[] = new Array(groups.length);
+  for (let groupIdx = 0; groupIdx < groups.length; groupIdx += 1) {
+    const prevIdx = mate[groupIdx];
+    if (prevIdx !== undefined) {
+      const inherited = previous[prevIdx]!.id;
+      ids[groupIdx] = inherited;
+      reserved.add(inherited);
+    }
+  }
+  for (let groupIdx = 0; groupIdx < groups.length; groupIdx += 1) {
+    if (ids[groupIdx] !== undefined) continue;
+    ids[groupIdx] = allocateFreshClusterId(groups[groupIdx]!, reserved);
+    reserved.add(ids[groupIdx]!);
+  }
+  return ids;
 }
 
 function stableClusterId(tokens: readonly string[]): string {
   const canonical = [...tokens].sort().join("|");
   return `cluster_${createHash("sha256").update(canonical || "empty").digest("hex").slice(0, 12)}`;
+}
+
+/** Fresh IDs must deterministically avoid inherited and already-allocated ids. */
+function allocateFreshClusterId(group: ClusterGroup, reserved: ReadonlySet<string>): string {
+  const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
+  const canonicalTokens = group.anchor.tokens.length > 0
+    ? [...group.anchor.tokens]
+    : [sorted[0]!.quoteVerbatim];
+  const base = stableClusterId(canonicalTokens);
+  if (!reserved.has(base)) return base;
+
+  const membership = sorted.map((member) => member.id).join(",");
+  const withMembers = stableClusterId([...canonicalTokens, `members:${membership}`]);
+  if (!reserved.has(withMembers)) return withMembers;
+
+  for (let salt = 2; ; salt += 1) {
+    const candidate = stableClusterId([...canonicalTokens, `members:${membership}`, `split:${salt}`]);
+    if (!reserved.has(candidate)) return candidate;
+  }
 }
 
 /** Lexical pain clustering: merge similar quotes; reuse prior cluster ids via shared evidence when available. */
@@ -131,23 +303,31 @@ export function clusterPainSignals(input: {
     else groups.push({ anchor: member, members: [member] });
   }
 
-  return groups
-    .map((group) => {
-      const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
-      const documentIds = [...new Set(sorted.map((item) => item.documentId))];
-      const groupsIndep = new Set(documentIds.map((id) => input.independenceGroupByDocumentId.get(id) ?? id));
-      const statement = [...sorted].sort((a, b) => b.quoteVerbatim.length - a.quoteVerbatim.length || a.id.localeCompare(b.id))[0]!.quoteVerbatim.slice(0, 180);
-      return {
-        id: resolveGroupClusterId(group, input.previousClusters),
-        painStatement: statement,
-        signalTypes: [...new Set(sorted.map((item) => item.signalType))],
-        documentIds,
-        evidenceIds: sorted.map((item) => item.id),
-        independentSourceCount: groupsIndep.size,
-        languages: [...new Set(documentIds.map((id) => input.documentLanguages?.get(id) ?? "und"))].sort(),
-      };
-    })
-    .sort((a, b) => a.id.localeCompare(b.id));
+  const clusterIds = assignClusterIds(groups, input.previousClusters);
+
+  const result = groups.map((group, index) => {
+    const sorted = [...group.members].sort((a, b) => a.id.localeCompare(b.id));
+    const documentIds = [...new Set(sorted.map((item) => item.documentId))];
+    const groupsIndep = new Set(documentIds.map((id) => input.independenceGroupByDocumentId.get(id) ?? id));
+    const statement = [...sorted].sort((a, b) => b.quoteVerbatim.length - a.quoteVerbatim.length || a.id.localeCompare(b.id))[0]!.quoteVerbatim.slice(0, 180);
+    return {
+      id: clusterIds[index]!,
+      painStatement: statement,
+      signalTypes: [...new Set(sorted.map((item) => item.signalType))],
+      documentIds,
+      evidenceIds: sorted.map((item) => item.id),
+      independentSourceCount: groupsIndep.size,
+      languages: [...new Set(documentIds.map((id) => input.documentLanguages?.get(id) ?? "und"))].sort(),
+    };
+  });
+
+  if (new Set(result.map((cluster) => cluster.id)).size !== result.length) {
+    throw new Error(
+      `clusterPainSignals produced duplicate cluster ids: ${result.map((cluster) => cluster.id).join(", ")}`,
+    );
+  }
+
+  return result.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export function countNewClusters(

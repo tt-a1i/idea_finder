@@ -81,6 +81,54 @@ function hasRetryableQueries(queries: readonly SearchQueryVariant[]): boolean {
   return queries.some((query) => isRetryableQueryStatus(query.status));
 }
 
+function cloneClusterSeeds(seeds: readonly PainClusterSeed[]): PainClusterSeed[] {
+  return seeds.map((cluster) => ({ ...cluster }));
+}
+
+function checkpointClusterBaseline(checkpoint: ResearchLedger["lastCheckpoint"]): readonly string[] | undefined {
+  if (checkpoint?.phase !== "harvested") return undefined;
+  if (checkpoint.knownClusters !== undefined) {
+    return checkpoint.knownClusters.map((cluster) => cluster.id);
+  }
+  return checkpoint.knownClusterIds;
+}
+
+function restoreKnownClustersFromCheckpoint(
+  checkpoint: ResearchLedger["lastCheckpoint"],
+  clustersAtStart: PainClusterSeed[],
+): PainClusterSeed[] {
+  if (checkpoint?.phase !== "harvested") return clustersAtStart;
+  if (checkpoint.knownClusters !== undefined) return cloneClusterSeeds(checkpoint.knownClusters);
+  if (checkpoint.knownClusterIds !== undefined) {
+    if (checkpoint.knownClusterIds.length === 0) return [];
+    throw new Error(
+      "harvested checkpoint has knownClusterIds but no knownClusters seeds; "
+      + "cannot restore cluster identity after ID drift. Re-run research to regenerate checkpoints with knownClusters.",
+    );
+  }
+  return clustersAtStart;
+}
+
+function restoreRoundBaselineFromSummary(summary: ResearchRoundSummary): {
+  readonly ids: Set<string>;
+  readonly seeds: PainClusterSeed[];
+} {
+  if (summary.clusterBaselineSeeds !== undefined) {
+    const seeds = cloneClusterSeeds(summary.clusterBaselineSeeds);
+    return { ids: new Set(seeds.map((cluster) => cluster.id)), seeds };
+  }
+  if (summary.clusterBaselineIds !== undefined) {
+    if (summary.clusterBaselineIds.length === 0) {
+      return { ids: new Set(), seeds: [] };
+    }
+    throw new Error(
+      "round summary has clusterBaselineIds but no clusterBaselineSeeds; "
+      + "cannot restore cluster identity after ID drift. Re-run research to regenerate ledgers with clusterBaselineSeeds.",
+    );
+  }
+  throw new Error("round summary missing cluster baseline");
+}
+
 /** Current unresolved failures only — historical attempt incompleteness must not permanently pollute. */
 export function recomputeCoverageIncomplete(
   queries: readonly SearchQueryVariant[],
@@ -98,11 +146,31 @@ export function recomputeCoverageIncomplete(
   });
 }
 
+function restorePriorRoundResultSeeds(
+  rounds: readonly ResearchRoundSummary[],
+  roundNumber: number,
+): PainClusterSeed[] | null {
+  if (roundNumber <= 1) return null;
+  const prior = rounds.find((round) => round.round === roundNumber - 1);
+  if (prior === undefined) return null;
+  if (prior.clusterResultSeeds !== undefined) {
+    return cloneClusterSeeds(prior.clusterResultSeeds);
+  }
+  throw new Error(
+    `round ${roundNumber - 1} summary missing clusterResultSeeds; `
+    + "cannot restore cluster identity for the next round after ID drift. "
+    + "Re-run research to regenerate ledgers with clusterResultSeeds.",
+  );
+}
+
 function upsertRoundSummary(
   rounds: ResearchRoundSummary[],
   summary: ResearchRoundSummary,
   queries: readonly SearchQueryVariant[],
   sourceStatuses: readonly SourceStatusRow[],
+  clusterBaselineIds: readonly string[],
+  clusterBaselineSeeds: readonly PainClusterSeed[],
+  clusterResultSeeds: readonly PainClusterSeed[],
 ): void {
   const existingIndex = rounds.findIndex((round) => round.round === summary.round);
   if (existingIndex >= 0) {
@@ -114,14 +182,22 @@ function upsertRoundSummary(
       queryIds: mergedQueryIds,
       newDocumentCount: prior.newDocumentCount + summary.newDocumentCount,
       newEvidenceCount: prior.newEvidenceCount + summary.newEvidenceCount,
-      newClusterCount: Math.max(prior.newClusterCount, summary.newClusterCount),
+      // summary.newClusterCount is always relative to this round's fixed baseline.
+      newClusterCount: summary.newClusterCount,
       coverageIncomplete: recomputeCoverageIncomplete(roundQueries, sourceStatuses),
+      clusterBaselineIds: prior.clusterBaselineIds ?? clusterBaselineIds,
+      clusterBaselineSeeds: prior.clusterBaselineSeeds ?? cloneClusterSeeds(clusterBaselineSeeds),
+      // Final seeds always refresh after each attempt of this logical round.
+      clusterResultSeeds: cloneClusterSeeds(clusterResultSeeds),
     };
   } else {
     const roundQueries = queries.filter((query) => summary.queryIds.includes(query.id));
     rounds.push({
       ...summary,
       coverageIncomplete: recomputeCoverageIncomplete(roundQueries, sourceStatuses),
+      clusterBaselineIds,
+      clusterBaselineSeeds: cloneClusterSeeds(clusterBaselineSeeds),
+      clusterResultSeeds: cloneClusterSeeds(clusterResultSeeds),
     });
   }
 }
@@ -144,19 +220,49 @@ export async function runBroadResearchRounds(input: {
   const rounds: ResearchRoundSummary[] = existingLedger ? [...existingLedger.rounds] : [];
   let lastCheckpoint = existingLedger?.lastCheckpoint;
 
+  let roundNumber = lastCheckpoint?.phase === "harvested"
+    ? lastCheckpoint.round
+    : resolveStartRound(queries, rounds);
+
+  const existingRoundSummary = rounds.find((round) => round.round === roundNumber);
+  const harvestedBaseline = checkpointClusterBaseline(lastCheckpoint);
+  let roundClusterBaselineIds: Set<string> | null = harvestedBaseline !== undefined
+    ? new Set(harvestedBaseline)
+    : null;
+  let roundClusterBaselineSeeds: PainClusterSeed[] | null = lastCheckpoint?.phase === "harvested" && lastCheckpoint.knownClusters !== undefined
+    ? cloneClusterSeeds(lastCheckpoint.knownClusters)
+    : null;
+
+  if (roundClusterBaselineIds === null && existingRoundSummary !== undefined) {
+    const restored = restoreRoundBaselineFromSummary(existingRoundSummary);
+    roundClusterBaselineIds = restored.ids;
+    roundClusterBaselineSeeds = restored.seeds;
+  }
+
+  const priorRoundResultSeeds = roundClusterBaselineSeeds === null
+    ? restorePriorRoundResultSeeds(rounds, roundNumber)
+    : null;
+
+  const identityAnchor = roundClusterBaselineSeeds
+    ?? priorRoundResultSeeds
+    ?? (lastCheckpoint?.phase === "harvested"
+      ? restoreKnownClustersFromCheckpoint(lastCheckpoint, [])
+      : null);
+
   const signalsAtStart = deps.storage.rawSignals.listByRun(runId);
   const independenceAtStart = independenceMap(deps.storage, runId);
-  // Resume from harvested: harvest already persisted this round's signals — do not treat them as prior clusters.
   const clustersAtStart = clusterPainSignals({
     signals: signalsAtStart,
     independenceGroupByDocumentId: independenceAtStart,
+    previousClusters: identityAnchor ?? undefined,
   });
-  const harvestedBaselineIds = lastCheckpoint?.phase === "harvested"
-    ? lastCheckpoint.knownClusterIds
-    : undefined;
-  let knownClusters: PainClusterSeed[] = harvestedBaselineIds !== undefined
-    ? clustersAtStart.filter((cluster) => harvestedBaselineIds.includes(cluster.id))
-    : clustersAtStart;
+  let knownClusters = lastCheckpoint?.phase === "harvested"
+    ? restoreKnownClustersFromCheckpoint(lastCheckpoint, clustersAtStart)
+    : roundClusterBaselineSeeds !== null
+      ? cloneClusterSeeds(roundClusterBaselineSeeds)
+      : priorRoundResultSeeds !== null
+        ? cloneClusterSeeds(priorRoundResultSeeds)
+        : clustersAtStart;
   let knownClusterIds = new Set(knownClusters.map((cluster) => cluster.id));
 
   // Budget: count only successful/skipped queries; failed/partial retries get a fresh attempt slot.
@@ -164,9 +270,6 @@ export async function runBroadResearchRounds(input: {
 
   let documentCount = deps.storage.rawDocuments.listByRun(runId).length;
   let evidenceCount = deps.storage.evidenceItems.listByRun(runId).length;
-  let roundNumber = lastCheckpoint?.phase === "harvested"
-    ? lastCheckpoint.round
-    : resolveStartRound(queries, rounds);
 
   const sourceStatusesNow = () => deps.storage.sourceStatuses.listByRun(runId) as SourceStatusRow[];
   let coverageIncomplete = recomputeCoverageIncomplete(queries, sourceStatusesNow());
@@ -179,6 +282,7 @@ export async function runBroadResearchRounds(input: {
       readonly docsBefore: number;
       readonly evidenceBefore: number;
       readonly knownClusterIds: readonly string[];
+      readonly knownClusters: readonly PainClusterSeed[];
     },
   ) => {
     lastCheckpoint = phase === "harvested" && harvestBaseline
@@ -188,6 +292,7 @@ export async function runBroadResearchRounds(input: {
           docsBefore: harvestBaseline.docsBefore,
           evidenceBefore: harvestBaseline.evidenceBefore,
           knownClusterIds: [...harvestBaseline.knownClusterIds],
+          knownClusters: harvestBaseline.knownClusters.map((cluster) => ({ ...cluster })),
         }
       : { round, phase };
     const ledger: ResearchLedger = {
@@ -223,7 +328,8 @@ export async function runBroadResearchRounds(input: {
       independenceGroupByDocumentId: independence,
       previousClusters: knownClusters,
     });
-    const newClusterCount = countNewClusters(knownClusterIds, clusters);
+    const baselineIds = roundClusterBaselineIds ?? knownClusterIds;
+    const newClusterCount = countNewClusters(baselineIds, clusters);
     knownClusters = clusters;
     knownClusterIds = new Set(clusters.map((cluster) => cluster.id));
 
@@ -241,7 +347,7 @@ export async function runBroadResearchRounds(input: {
       newEvidenceCount: Math.max(0, evidenceCount - inputRound.evidenceBefore),
       newClusterCount,
       coverageIncomplete: roundIncomplete,
-    }, queries, allStatuses);
+    }, queries, allStatuses, [...(roundClusterBaselineIds ?? knownClusterIds)], roundClusterBaselineSeeds ?? knownClusters, clusters);
 
     let nextStop = evaluateStopCondition({
       rounds,
@@ -274,6 +380,8 @@ export async function runBroadResearchRounds(input: {
         queries = mergeQueryLists(queries, followUps);
         persistAtomic(nextStop, "round_complete", roundNumber);
         roundNumber += 1;
+        roundClusterBaselineIds = null;
+        roundClusterBaselineSeeds = null;
       }
     }
     return nextStop;
@@ -300,19 +408,23 @@ export async function runBroadResearchRounds(input: {
         .map((query) => query.id);
       const docsBefore = lastCheckpoint.docsBefore;
       const evidenceBefore = lastCheckpoint.evidenceBefore;
-      const clusterBaseline = lastCheckpoint.knownClusterIds;
+      const clusterBaseline = checkpointClusterBaseline(lastCheckpoint);
       if (docsBefore === undefined || evidenceBefore === undefined || clusterBaseline === undefined) {
         const missing = [
           docsBefore === undefined ? "docsBefore" : null,
           evidenceBefore === undefined ? "evidenceBefore" : null,
-          clusterBaseline === undefined ? "knownClusterIds" : null,
+          clusterBaseline === undefined ? "knownClusterIds/knownClusters" : null,
         ].filter((item): item is string => item !== null);
         throw new Error(
           `harvested checkpoint missing baseline(s): ${missing.join(", ")}; re-run research so harvest checkpoints include docs/evidence/cluster baselines`,
         );
       }
-      knownClusters = clustersAtStart.filter((cluster) => clusterBaseline.includes(cluster.id));
+      knownClusters = restoreKnownClustersFromCheckpoint(lastCheckpoint, clustersAtStart);
       knownClusterIds = new Set(knownClusters.map((cluster) => cluster.id));
+      roundClusterBaselineIds = new Set(clusterBaseline);
+      roundClusterBaselineSeeds = lastCheckpoint.knownClusters !== undefined
+        ? cloneClusterSeeds(lastCheckpoint.knownClusters)
+        : [];
       stopReason = await finishIntelligenceAndRound({
         queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
         docsBefore,
@@ -363,6 +475,11 @@ export async function runBroadResearchRounds(input: {
     const docsBefore = deps.storage.rawDocuments.listByRun(runId).length;
     const evidenceBefore = deps.storage.evidenceItems.listByRun(runId).length;
 
+    if (roundClusterBaselineIds === null) {
+      roundClusterBaselineIds = new Set(knownClusterIds);
+      roundClusterBaselineSeeds = cloneClusterSeeds(knownClusters);
+    }
+
     const queryPlan: QueryPlan = buildQueryPlanFromBrief(brief, brief.id, selection.toRun);
     const priorStatuses = sourceStatusesNow();
     const completedRequestKeys = new Set(
@@ -381,7 +498,8 @@ export async function runBroadResearchRounds(input: {
     persistAtomic("continue", "harvested", roundNumber, {
       docsBefore,
       evidenceBefore,
-      knownClusterIds: [...knownClusterIds],
+      knownClusterIds: [...roundClusterBaselineIds],
+      knownClusters: (roundClusterBaselineSeeds ?? knownClusters).map((cluster) => ({ ...cluster })),
     });
 
     stopReason = await finishIntelligenceAndRound({

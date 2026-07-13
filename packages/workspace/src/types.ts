@@ -33,6 +33,28 @@ export interface ResearchRoundSummary {
   readonly newEvidenceCount: number;
   readonly newClusterCount: number;
   readonly coverageIncomplete: boolean;
+  /** Cluster ids known before this logical round's first harvest attempt. */
+  readonly clusterBaselineIds?: readonly string[];
+  /** Full cluster seeds before this logical round's first harvest attempt; restores identity on cross-invocation retry. */
+  readonly clusterBaselineSeeds?: readonly {
+    readonly id: string;
+    readonly painStatement: string;
+    readonly signalTypes: readonly string[];
+    readonly documentIds: readonly string[];
+    readonly evidenceIds: readonly string[];
+    readonly independentSourceCount: number;
+    readonly languages: readonly string[];
+  }[];
+  /** Final cluster seeds after this logical round completes; anchors identity for the next round across invocations. */
+  readonly clusterResultSeeds?: readonly {
+    readonly id: string;
+    readonly painStatement: string;
+    readonly signalTypes: readonly string[];
+    readonly documentIds: readonly string[];
+    readonly evidenceIds: readonly string[];
+    readonly independentSourceCount: number;
+    readonly languages: readonly string[];
+  }[];
 }
 
 export interface ResearchLedger {
@@ -47,6 +69,16 @@ export interface ResearchLedger {
     readonly evidenceBefore?: number;
     /** Cluster ids known before this round's harvest; required when phase is harvested. */
     readonly knownClusterIds?: readonly string[];
+    /** Full cluster seeds before this round's harvest; restores identity on resume. */
+    readonly knownClusters?: readonly {
+      readonly id: string;
+      readonly painStatement: string;
+      readonly signalTypes: readonly string[];
+      readonly documentIds: readonly string[];
+      readonly evidenceIds: readonly string[];
+      readonly independentSourceCount: number;
+      readonly languages: readonly string[];
+    }[];
   };
 }
 
