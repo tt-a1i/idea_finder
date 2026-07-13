@@ -13,8 +13,9 @@ import {
 } from "@idea-finder/orchestration";
 import { openLocalStorage } from "@idea-finder/storage";
 
-import type { HuntingBrief } from "../types.js";
+import type { HuntingBrief, SearchPlan } from "../types.js";
 import type { ResearchRunner } from "../ports/research-runner.js";
+import { runBroadResearchRounds } from "./broad-research-rounds.js";
 import {
   buildQueryPlanFromBrief,
   effectiveResearchConfig,
@@ -74,9 +75,8 @@ export function createOrchestrationResearchRunner(
         });
 
         const searchPlan = brief.searchPlanId
-          ? storage.searchPlans.get(brief.searchPlanId) as { queries?: readonly { id: string; queryText: string; source: string }[] } | null
+          ? (storage.searchPlans.get(brief.searchPlanId) as SearchPlan | null)
           : null;
-        const queryPlan = buildQueryPlanFromBrief(brief, request.taskId, searchPlan?.queries);
         const effectiveConfig = effectiveResearchConfig(brief);
         const configHash = effectiveResearchConfigHash(brief);
 
@@ -93,19 +93,53 @@ export function createOrchestrationResearchRunner(
         if (run.huntingTaskId !== request.taskId || run.configHash !== configHash) {
           throw new Error(`ResearchRun configuration mismatch: ${request.runId}`);
         }
+
+        let researchLedger = undefined;
+        let completed = run;
+        const priorConfig = storage.researchRunConfigs.get(run.id) as import("../types.js").StoredResearchRunConfig | null;
+
+        if (searchPlan?.status === "confirmed" && searchPlan.queries.length > 0 && harvestMode === "l0") {
+          const roundResult = await runBroadResearchRounds({
+            deps: { storage, harvest, intelligence, queryTermsFromBrief },
+            brief,
+            runId: run.id,
+            plan: searchPlan,
+            execution: request.execution,
+            effectiveConfig,
+            existingLedger: request.execution === "new" ? null : (priorConfig?.researchLedger ?? null),
+          });
+          researchLedger = roundResult.ledger;
+          storage.searchPlans.save({
+            ...searchPlan,
+            queries: roundResult.queries,
+            updatedAt: new Date().toISOString(),
+          } as { readonly id: string });
+
+          const queryPlan = buildQueryPlanFromBrief(brief, request.taskId, roundResult.queries);
+          try {
+            completed = await orchestrator.runPipeline(run.id, {
+              queryPlan,
+              skipHarvest: true,
+              skipIntelligence: true,
+            });
+          } catch {
+            completed = orchestrator.getRun(run.id) ?? run;
+          }
+        } else {
+          const queryPlan = buildQueryPlanFromBrief(brief, request.taskId, searchPlan?.queries);
+          try {
+            completed = await orchestrator.runPipeline(run.id, { queryPlan });
+          } catch {
+            completed = orchestrator.getRun(run.id) ?? run;
+          }
+        }
+
         storage.researchRunConfigs.save({
           id: run.id,
           effectiveConfig,
           execution: request.execution,
+          researchLedger: researchLedger ?? priorConfig?.researchLedger,
         });
-
-        let completed;
-        try {
-          completed = await orchestrator.runPipeline(run.id, { queryPlan });
-        } catch {
-          completed = orchestrator.getRun(run.id);
-          if (!completed) throw new Error(`ResearchRun not found after failure: ${run.id}`);
-        }
 
         const documents = storage.rawDocuments.listByRun(run.id);
         const sourceStatuses = storage.sourceStatuses.listByRun(run.id) as never;
@@ -121,7 +155,12 @@ export function createOrchestrationResearchRunner(
           opportunities: storage.opportunities.listByRun(run.id),
           admissionResults: storage.libraryAdmissionResults.listByRun(run.id) as never,
           sourceStatuses,
-          config: { id: run.id, effectiveConfig, execution: request.execution },
+          config: {
+            id: run.id,
+            effectiveConfig,
+            execution: request.execution,
+            researchLedger,
+          },
         };
       } finally {
         storage.close();

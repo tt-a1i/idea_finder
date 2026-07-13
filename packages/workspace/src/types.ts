@@ -20,10 +20,31 @@ import type {
 } from "@idea-finder/agents";
 import type { ResearchRunExecution } from "./ports/research-runner.js";
 
+export type ResearchStopReason =
+  | "budget_exhausted"
+  | "budget_exhausted_partial"
+  | "saturated"
+  | "continue";
+
+export interface ResearchRoundSummary {
+  readonly round: number;
+  readonly queryIds: readonly string[];
+  readonly newDocumentCount: number;
+  readonly newEvidenceCount: number;
+  readonly newClusterCount: number;
+  readonly coverageIncomplete: boolean;
+}
+
+export interface ResearchLedger {
+  readonly rounds: readonly ResearchRoundSummary[];
+  readonly stopReason: ResearchStopReason;
+}
+
 export interface StoredResearchRunConfig {
   readonly id: string;
   readonly effectiveConfig: Readonly<Record<string, unknown>>;
   readonly execution: ResearchRunExecution;
+  readonly researchLedger?: ResearchLedger;
 }
 
 export interface LibraryAdmissionRecord {
@@ -95,7 +116,7 @@ export interface SearchQueryVariant {
   readonly round: number;
   readonly parentQueryId?: string | null;
   readonly triggerEvidenceId?: string | null;
-  readonly status: "pending" | "success" | "failure" | "skipped";
+  readonly status: "pending" | "success" | "failure" | "partial" | "skipped";
   readonly itemCount: number;
   readonly error?: string | null;
 }

@@ -658,7 +658,7 @@ export class WorkspaceService {
             description: `Confirmed search plan for: ${existing.topic}`,
             lenses: ["pain", "workaround", "wtp", "contradictory_evidence"],
             sourcesEnabled: existing.sourceFamilies.filter((source) =>
-              ["hn", "v2ex", "app_store", "stack_exchange", "manual"].includes(source),
+              ["hn", "v2ex", "app_store", "stack_exchange", "github_issues", "manual"].includes(source),
             ),
             successCriteria: "Broad demand discovery with corroborated qualitative evidence",
             createdAt: new Date().toISOString(),
@@ -667,7 +667,7 @@ export class WorkspaceService {
             queryPlan: {
               harvestMode: "l0",
               searches: existing.sourceFamilies
-                .filter((source) => ["hn", "v2ex", "app_store", "stack_exchange"].includes(source))
+                .filter((source) => ["hn", "v2ex", "app_store", "stack_exchange", "github_issues"].includes(source))
                 .map((platform) => ({ platform, terms: [existing.topic] })),
             },
           };
@@ -1722,6 +1722,15 @@ export class WorkspaceService {
     const storage = this.openCanonical();
     try { return storage.sourceStatuses.listByRun(runId) as ResearchSourceStatus[]; }
     finally { storage.close(); }
+  }
+
+  getResearchRunConfig(runId: ResearchRunId): StoredResearchRunConfig | null {
+    const storage = this.openCanonical();
+    try {
+      return storage.researchRunConfigs.get(runId) as StoredResearchRunConfig | null;
+    } finally {
+      storage.close();
+    }
   }
 
   inspectMultiLaneResearch(runId: ResearchRunId, claimId?: string): { report: StoredMultiLaneReportRecord; claims: ResearchClaim[]; details: unknown[]; independence: unknown[]; proposals: FollowUpHuntingTaskProposal[] } {

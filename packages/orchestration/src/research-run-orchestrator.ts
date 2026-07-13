@@ -54,6 +54,8 @@ export interface CreateRunRequest {
 
 export interface RunPipelineOptions {
   readonly queryPlan: QueryPlan;
+  readonly skipHarvest?: boolean;
+  readonly skipIntelligence?: boolean;
 }
 
 export interface ResearchRunOrchestrator {
@@ -114,7 +116,7 @@ export function createResearchRunOrchestrator(
       }
 
       try {
-        const harvestAlreadyComplete = stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest);
+        const harvestAlreadyComplete = options.skipHarvest || stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.harvest);
         const priorStatuses = stores.sourceStatuses.listByRun(runId) as Array<{ id: string; status: string }>;
         const completedRequestKeys = new Set(priorStatuses.filter((item) => item.status === "success").map((item) => item.id));
         const harvestResult = harvestAlreadyComplete ? null : await harvest.runHarvest(runId, options.queryPlan, { completedRequestKeys });
@@ -130,7 +132,8 @@ export function createResearchRunOrchestrator(
         // partial pass marked those steps complete before the new documents existed.
         const shouldRefreshDownstream =
           incompleteSources.length > 0 || newlySuccessfulHarvest;
-        if (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || shouldRefreshDownstream) {
+        const intelligenceAlreadyComplete = options.skipIntelligence && !shouldRefreshDownstream;
+        if (!intelligenceAlreadyComplete && (!stores.pipelineSteps.isComplete(runId, PIPELINE_STEPS.intelligence) || shouldRefreshDownstream)) {
           await intelligence.run(runId);
           if (incompleteSources.length === 0) {
             stores.pipelineSteps.markComplete(runId, PIPELINE_STEPS.intelligence);

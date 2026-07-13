@@ -20,6 +20,7 @@ export interface SourceExecutionResult {
   readonly startedAt: string;
   readonly completedAt: string;
   readonly retryAt: string | null;
+  readonly artifactIds?: readonly string[];
 }
 
 /** Persistence port for harvest output until storage integration lands. */

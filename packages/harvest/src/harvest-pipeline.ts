@@ -61,7 +61,7 @@ export function createHarvestPipeline(deps: HarvestPipelineDeps): HarvestPipelin
             ingestDocument(doc, sourceChunks, sourceSignals);
             sourceDocuments.push(doc);
           }
-          status = execution(requestKey, search.platform, "success", sourceDocuments.length, sourceDocuments.length === 0 ? "zero_results" : "none", null, startedAt);
+          status = execution(requestKey, search.platform, "success", sourceDocuments.length, sourceDocuments.length === 0 ? "zero_results" : "none", null, startedAt, sourceDocuments.map((doc) => doc.id));
         } catch (error) {
           status = classifyExecution(requestKey, search.platform, error, startedAt);
         }
@@ -85,7 +85,7 @@ export function createHarvestPipeline(deps: HarvestPipelineDeps): HarvestPipelin
         manualDocuments.push(doc);
       }
       if (!options.completedRequestKeys?.has(manualRequestKey) && (plan.manualImports?.length ?? 0) > 0) {
-        const status = execution(manualRequestKey, "manual", "success", manualDocuments.length, manualDocuments.length === 0 ? "zero_results" : "none", null, manualStartedAt);
+        const status = execution(manualRequestKey, "manual", "success", manualDocuments.length, manualDocuments.length === 0 ? "zero_results" : "none", null, manualStartedAt, manualDocuments.map((doc) => doc.id));
         if (deps.repository) await deps.repository.saveSourceResult(runId, { documents: manualDocuments, chunks: manualChunks, signals: manualSignals }, status);
         documents.push(...manualDocuments); chunks.push(...manualChunks); signals.push(...manualSignals);
         sourceExecutions.push(status);
@@ -98,8 +98,8 @@ export function createHarvestPipeline(deps: HarvestPipelineDeps): HarvestPipelin
   };
 }
 
-function execution(requestKey: string, source: string, status: SourceExecutionResult["status"], itemCount: number, reasonCode: SourceExecutionResult["reasonCode"], reason: string | null, startedAt: string): SourceExecutionResult {
-  return { id: requestKey, source, requestKey, status, itemCount, reasonCode, reason, startedAt, completedAt: new Date().toISOString(), retryAt: null };
+function execution(requestKey: string, source: string, status: SourceExecutionResult["status"], itemCount: number, reasonCode: SourceExecutionResult["reasonCode"], reason: string | null, startedAt: string, artifactIds: readonly string[] = []): SourceExecutionResult {
+  return { id: requestKey, source, requestKey, status, itemCount, reasonCode, reason, startedAt, completedAt: new Date().toISOString(), retryAt: null, artifactIds };
 }
 
 function classifyExecution(requestKey: string, source: string, error: unknown, startedAt: string): SourceExecutionResult {

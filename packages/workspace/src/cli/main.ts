@@ -8,6 +8,7 @@ import { InvariantViolation } from "@idea-finder/core";
 import { renderMarkdownReport } from "../report/markdown-export.js";
 import { buildPainMapReport, renderPainMapMarkdown } from "../report/pain-map.js";
 import { clusterPainSignals } from "../orchestration/research-rounds.js";
+import { resolveHarvestMode } from "../orchestration/query-plan-builder.js";
 import { resolveWorkspacePaths } from "../storage/workspace-store.js";
 import type { ResearchSourceStatus } from "../types.js";
 import { WorkspaceService } from "../workspace-service.js";
@@ -800,11 +801,19 @@ async function execute(argv: string[], workspaceDir: string): Promise<CommandRes
           signals: run.signals,
           independenceGroupByDocumentId: independence,
         });
+        const runConfig = service.getResearchRunConfig(runId as never);
+        const ledger = runConfig?.researchLedger;
+        const stopReason = ledger?.stopReason ?? "unknown";
+        const rounds = ledger?.rounds ?? [];
+        const needsRoundLedger = resolveHarvestMode(brief) === "l0" && plan.queries.length > 0;
+        if (needsRoundLedger && !ledger) {
+          incompletenessReasons = [...incompletenessReasons, "research: missing round ledger"];
+        }
         painMap = buildPainMapReport({
           plan,
           clusters,
-          rounds: [{ round: 1, queryIds: plan.queries.map((query) => query.id), newDocumentCount: run.documents.length, newEvidenceCount: run.evidence.length, newClusterCount: clusters.length, coverageIncomplete: incompletenessReasons.length > 0 }],
-          stopReason: incompletenessReasons.length ? "budget_exhausted_partial" : (clusters.length === 0 ? "budget_exhausted" : "saturated"),
+          rounds,
+          stopReason,
           documentCount: run.documents.length,
           evidenceCount: run.evidence.length,
           dedupeCount: Math.max(0, run.documents.length - independence.size),

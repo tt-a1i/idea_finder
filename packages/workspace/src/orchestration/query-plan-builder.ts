@@ -1,10 +1,21 @@
 import { createHash } from "node:crypto";
 import type { HuntingTaskId } from "@idea-finder/core";
 import type { QueryPlan, SourceSearchQuery } from "@idea-finder/connectors";
-import type { HuntingBrief } from "../types.js";
+import type { HuntingBrief, SearchQueryVariant } from "../types.js";
 
 export function resolveHarvestMode(brief: HuntingBrief): "manual" | "l0" {
   return brief.queryPlan?.harvestMode ?? "manual";
+}
+
+const NETWORK_SOURCES = new Set(["hn", "v2ex", "app_store", "stack_exchange", "github_issues"]);
+
+function expandHnSearches(search: SourceSearchQuery): SourceSearchQuery[] {
+  if (search.platform !== "hn") return [search];
+  const queryId = search.queryId ?? `hn_${search.queryText ?? search.terms[0] ?? "query"}`;
+  return [
+    { ...search, queryId, hnTags: "story" },
+    { ...search, queryId: `${queryId}__comment`, hnTags: "comment" },
+  ];
 }
 
 /** Build a QueryPlan without inventing evidence that was not explicitly configured. */
@@ -26,8 +37,8 @@ export function buildQueryPlanFromBrief(
     return {
       huntingTaskId,
       searches: searchPlanQueries
-        .filter((query) => ["hn", "v2ex", "app_store", "stack_exchange", "github_issues"].includes(query.source))
-        .map((query) => ({
+        .filter((query) => NETWORK_SOURCES.has(query.source))
+        .flatMap((query) => expandHnSearches({
           platform: query.source,
           terms: [query.queryText],
           queryText: query.queryText,
@@ -47,7 +58,7 @@ export function buildQueryPlanFromBrief(
     for (const search of saved.searches ?? []) {
       const terms = [...search.terms];
       if (terms.length <= 1) {
-        searches.push({
+        searches.push(...expandHnSearches({
           platform: search.platform,
           terms,
           queryText: terms[0],
@@ -55,11 +66,11 @@ export function buildQueryPlanFromBrief(
           limit: search.limit,
           appId: search.appId,
           stackExchangeSite: search.stackExchangeSite,
-        });
+        }));
         continue;
       }
       for (const [index, term] of terms.entries()) {
-        searches.push({
+        searches.push(...expandHnSearches({
           platform: search.platform,
           terms: [term],
           queryText: term,
@@ -68,7 +79,7 @@ export function buildQueryPlanFromBrief(
           limit: search.limit,
           appId: search.appId,
           stackExchangeSite: search.stackExchangeSite,
-        });
+        }));
       }
     }
     return {
@@ -89,14 +100,16 @@ export function buildQueryPlanFromBrief(
       searches: brief.sourcesEnabled
         .filter((platform) => platform !== "manual" && platform !== "reddit")
         .flatMap((platform) =>
-          (uniqueTerms.length > 0 ? uniqueTerms : ["tooling"]).map((term, index) => ({
-            platform,
-            terms: [term],
-            queryText: term,
-            queryId: `l0_${platform}_${index}`,
-            huntingTaskId,
-            limit: 5,
-          })),
+          (uniqueTerms.length > 0 ? uniqueTerms : ["tooling"]).flatMap((term, index) =>
+            expandHnSearches({
+              platform,
+              terms: [term],
+              queryText: term,
+              queryId: `l0_${platform}_${index}`,
+              huntingTaskId,
+              limit: 5,
+            }),
+          ),
         ),
       manualImports: undefined,
     };
@@ -145,4 +158,10 @@ export function queryTermsFromBrief(brief: HuntingBrief): string[] {
     .filter((w) => w.length > 3)
     .slice(0, 5);
   return [...new Set([...fromPlan, ...fromLenses, ...fromDescription])];
+}
+
+export function pendingSearchPlanQueries(
+  queries: readonly SearchQueryVariant[],
+): readonly SearchQueryVariant[] {
+  return queries.filter((query) => query.status === "pending");
 }

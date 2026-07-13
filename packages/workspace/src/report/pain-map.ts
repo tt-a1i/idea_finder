@@ -1,5 +1,5 @@
-import type { SearchPlan } from "../types.js";
-import type { PainClusterSeed, ResearchRoundSummary, ResearchStopReason } from "../orchestration/research-rounds.js";
+import type { ResearchRoundSummary, ResearchStopReason, SearchPlan } from "../types.js";
+import type { PainClusterSeed } from "../orchestration/research-rounds.js";
 
 export interface PainMapReport {
   readonly schemaVersion: "pain_map_v1";

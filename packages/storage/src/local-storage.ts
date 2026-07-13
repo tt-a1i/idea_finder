@@ -56,6 +56,10 @@ export interface StoredRunConfigRecord {
   readonly id: string;
   readonly effectiveConfig: unknown;
   readonly execution: string;
+  readonly researchLedger?: {
+    readonly rounds: readonly unknown[];
+    readonly stopReason: string;
+  };
 }
 
 export interface StoredAdmissionResultRecord {

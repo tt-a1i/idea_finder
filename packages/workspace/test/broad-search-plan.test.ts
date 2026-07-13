@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBroadQueryVariants, countDistinctLenses } from "../src/orchestration/broad-search-plan.js";
+import { buildBroadQueryVariants, countDistinctLenses, coverageStats } from "../src/orchestration/broad-search-plan.js";
 import { buildProposedSearchPlan } from "../src/orchestration/search-plan.js";
 import { resolveQueryTexts } from "@idea-finder/connectors";
 import { buildQueryPlanFromBrief } from "../src/orchestration/query-plan-builder.js";
@@ -19,6 +19,9 @@ describe("broad query variants", () => {
     expect(new Set(queries.map((query) => query.id)).size).toBe(queries.length);
     expect(queries.every((query) => query.language === "en" || query.language === "zh")).toBe(true);
     expect(queries.every((query) => query.status === "pending")).toBe(true);
+    const stats = coverageStats(queries);
+    expect(stats.languages).toBeGreaterThanOrEqual(2);
+    expect(stats.sources).toBeGreaterThanOrEqual(2);
   });
 
   it("does not join all terms into one connector query string", () => {
@@ -45,9 +48,15 @@ describe("broad query variants", () => {
       },
     };
     const plan = buildQueryPlanFromBrief(brief, brief.id);
-    expect(plan.searches).toHaveLength(2);
-    expect(plan.searches.map((search) => search.queryText)).toEqual(["agent coding", "workaround"]);
+    expect(plan.searches).toHaveLength(4);
+    expect(plan.searches.map((search) => search.queryText)).toEqual([
+      "agent coding",
+      "agent coding",
+      "workaround",
+      "workaround",
+    ]);
     expect(plan.searches.every((search) => search.terms.length === 1)).toBe(true);
+    expect(plan.searches.filter((search) => search.hnTags === "comment")).toHaveLength(2);
   });
 
   it("manual harvest mode keeps SearchPlan network queries out of the QueryPlan", () => {
