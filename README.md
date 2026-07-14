@@ -31,11 +31,20 @@ Natural-language Skill path: `topic → plan propose → human confirmation → 
 | `npm run typecheck` | Typecheck all packages (`tsc --build`) |
 | `npm run build` | Compile all packages to `dist/` |
 | `npm run dev` | Watch mode compile |
-| `npm run test` | Run Vitest |
+| `npm run test` | Run Vitest (deterministic; live suites skipped unless opted in) |
 | `npm run lint` | Typecheck + test (Wave 1 gate; no ESLint yet) |
-| `npm run release:gate` | Run the deterministic CLI + Skill release gate |
-| `npm run test:skill-agent` | Run the live Skill evaluation with an authenticated Codex CLI |
-| `npm run test:live-smoke` | Optional live connector smoke (`IDEA_FINDER_LIVE_SMOKE=1`) |
+| `npm run release:gate` | Deterministic typecheck + fixture suite (no live network) |
+| `npm run release:smoke` | Clean-consumer pack/install CLI + Skill contract smoke |
+| `npm run test:live-smoke` | Opt-in HN Algolia probe (`IDEA_FINDER_LIVE_SMOKE=1`) |
+| `npm run test:live-acceptance` | Opt-in HN + GitHub Issues dual-source acceptance |
+| `npm run test:skill-agent` | Live Skill eval (authenticated Codex CLI or `OPENAI_API_KEY`) |
+
+### Verification layers
+
+- **Deterministic gate** (`npm run release:gate`): offline fixtures only; safe for every PR.
+- **Live HN smoke** (`npm run test:live-smoke`): single real Algolia hit; never part of the gate.
+- **Live dual-source acceptance** (`npm run test:live-acceptance`): real HN + GitHub Issues research through propose → confirm → run → export/ledger. Needs network and a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`). Optional redacted summary via `IDEA_FINDER_LIVE_ACCEPTANCE_OUT=<dir>`. Manual workflow: `live-dual-source-acceptance`.
+- **Live Skill Agent eval** (`npm run test:skill-agent`): real Codex CLI against the packed Skill. Manual workflow: `live-skill-agent-eval`.
 
 ## Package layout
 

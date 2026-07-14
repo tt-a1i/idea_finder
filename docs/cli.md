@@ -38,8 +38,22 @@ npm run release:smoke
 
 The complete pull-request release gate is `npm run release:gate`. It runs root
 typechecking and the full deterministic fixture suite without live network
-access. A maintainer may separately run `npm run test:live-smoke`; that optional
-HN probe is never part of the release gate and does not affect release status.
+access. Opt-in live suites are never part of that gate and do not affect PR
+release status:
+
+| Command | What it proves | Prerequisites |
+| --- | --- | --- |
+| `npm run test:live-smoke` | Real HN Algolia returns ≥1 non-fixture document | Network |
+| `npm run test:live-acceptance` | HN + GitHub Issues dual-source propose → confirm → run → export/ledger | Network; GitHub token via `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token` |
+| `npm run test:skill-agent` | Authenticated Codex respects Skill confirmation / validation boundaries | `codex` CLI + ChatGPT login or `OPENAI_API_KEY` |
+
+Write a redacted acceptance summary locally with
+`IDEA_FINDER_LIVE_ACCEPTANCE_OUT=/tmp/live-accept npm run test:live-acceptance`.
+The manually triggered `live-dual-source-acceptance` GitHub workflow runs the
+same command on Node 22 with `npm ci`, fails the job on assertion failure (no
+`continue-on-error`), and uploads the redacted `IDEA_FINDER_LIVE_ACCEPTANCE_OUT`
+directory: required `export-summary.json`, plus `export.md` only when the export
+envelope included markdown.
 
 ## Usage
 
@@ -320,9 +334,52 @@ demonstration records are never treated as product evidence implicitly.
 npm test -- packages/workspace
 npm run release:gate
 
+# Opt-in live probes (never required by release:gate / ordinary npm test):
+npm run test:live-smoke
+IDEA_FINDER_LIVE_ACCEPTANCE_OUT=/tmp/live-accept npm run test:live-acceptance
+
 # Live Agent evaluation: requires an authenticated Codex CLI or OPENAI_API_KEY.
 npm run test:skill-agent
 ```
+
+### Deterministic gate vs live acceptance
+
+`npm run release:gate` proves typechecking and fixture/offline behavior only.
+Ordinary `npm test` skips live suites unless an opt-in env var is set by the
+dedicated scripts above (`IDEA_FINDER_LIVE_SMOKE=1` or
+`IDEA_FINDER_LIVE_ACCEPTANCE=1`). Do not export those variables into PR CI.
+
+Live dual-source acceptance asserts both `hn` and `github_issues` report
+`success` with `itemCount > 0`, at least two research rounds, shared `runId`
+across run/export/ledger, real HTTP document URLs (no fixture fetch method),
+and `stopReason` in `{saturated, budget_exhausted, budget_exhausted_partial}`.
+
+Research/export commands that retain useful results while a required source is
+incomplete return exit **6** (`partial-result`) with
+`incompleteness.reasons` naming every missing source. Exit **0** means the
+command envelope is complete success — not that every optional trend lane ran.
+
+### Diagnosing live failures
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| Deterministic gate green, only live red with changed assertions/fixtures | Code regression | Fix product code; add a deterministic RED test |
+| Source status `throttled` / HTTP 403–429 | Rate limit | Retry later; do not weaken thresholds |
+| Source status `unauthorized` / HTTP 401 | Missing or invalid GitHub credential | Set `GITHUB_TOKEN` / `GH_TOKEN` or `gh auth login` |
+| Source status `unavailable` / network errors | External outage or DNS | Retry; treat as environment, not domain bug |
+| Skill eval invents imports or mutates validation | Skill or packaging regression | Fix Skill/packaging under TDD; do not skip cases |
+
+### Live acceptance artifacts
+
+Allowed in summary artifacts:
+- required `export-summary.json`: `runId`, stop reason, round/document counts,
+  per-source success booleans, and platform + real public URL samples;
+- optional `export.md`: report markdown from the export envelope (credentials
+  must already be omitted by the CLI).
+
+Never store: API tokens, cookies, `Authorization` headers, home-directory
+paths that embed secrets, npm/GitHub/OpenAI secret values, or raw `gh auth`
+output.
 
 The deterministic gate executes Skill contract checks and the standalone CLI in
 isolated workspaces. The live Agent evaluation additionally packs the release,
@@ -333,4 +390,5 @@ without mutating state. It is also available as the manually triggered
 to ordinary pull-request jobs.
 
 End-to-end coverage includes the workspace vertical slice, installed standalone
-CLI, deterministic Skill contract checks, and the credentialed live Agent eval.
+CLI, deterministic Skill contract checks, credentialed live Agent eval, and the
+opt-in dual-source live acceptance path.

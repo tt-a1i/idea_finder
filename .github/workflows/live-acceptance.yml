@@ -1,0 +1,33 @@
+name: live-dual-source-acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dual-source-live-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run dual-source live acceptance
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IDEA_FINDER_LIVE_ACCEPTANCE_OUT: ${{ runner.temp }}/live-acceptance-out
+        run: |
+          mkdir -p "$IDEA_FINDER_LIVE_ACCEPTANCE_OUT"
+          npm run test:live-acceptance
+      - name: Upload redacted acceptance summary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-acceptance-summary
+          path: ${{ runner.temp }}/live-acceptance-out/
+          if-no-files-found: error
