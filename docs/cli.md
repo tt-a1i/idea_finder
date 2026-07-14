@@ -4,13 +4,13 @@ Command-line workflow for the personal demand workspace (Wave 2 vertical slice).
 
 ## Install the standalone CLI
 
-Requires Node.js 22.5+. The root package technical candidate is `0.1.0-rc.1`.
-It has not been published to the npm registry, and there is no release tag or
-GitHub Release yet. Formal publish remains blocked until a project license is
-approved (this repository does not yet ship a `LICENSE` file or `license`
-field), then push, tag, and registry publish can follow. Root
-`publishConfig.access` is `public` so a future licensed publish would be public
-by default; it is not evidence that a registry release exists.
+Requires Node.js 22.5+. `idea-finder` is a **local-only personal tool**. Local
+artifact version `0.1.0-rc.1` is not a public release. Install only via
+repository pack/install of the generated tarball — there is no public npm
+registry install path. The root package uses `private: true` to block accidental
+npm publish, and `license: "UNLICENSED"` because no license is granted to others.
+There is no plan for npm publish, dist-tag, git release tag, or GitHub Release.
+GitHub repository visibility is a separate remote decision.
 
 **From this repository** (local pack/install; use the exact filename printed by
 `npm pack` so leftover tarballs cannot shadow the install):
@@ -33,10 +33,8 @@ mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R "$(npm root -g)/idea-finder/skills/idea-finder" "${CODEX_HOME:-$HOME/.codex}/skills/idea-finder"
 ```
 
-Do **not** run `npm install -g idea-finder` yet — registry install only becomes
-valid after a licensed public publish. A future prerelease registry publish must
-pass an explicit dist-tag (for example `npm publish --tag rc`); npm 11 rejects
-untagged prerelease publishes.
+Do **not** run `npm install -g idea-finder` from the registry — that path is not
+supported. Use the local pack workflow above.
 
 The packed root package contains a bundled `idea-finder` executable and does not
 require this repository or its npm scripts at runtime. During repository

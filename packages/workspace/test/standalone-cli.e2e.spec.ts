@@ -97,10 +97,11 @@ describe("installed standalone CLI", () => {
     expect(packedFiles.some((file) => /(^|\/)(?:data|\.scratch|node_modules)(\/|$)|\.env|secret|credential/i.test(file))).toBe(false);
   });
 
-  it("locks the technical RC package and lockfile root publish contract", async () => {
+  it("locks the local distribution contract for root and packed manifests", async () => {
     const rootManifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8")) as {
       name: string;
       version: string;
+      private?: boolean;
       description?: string;
       bin: Record<string, string>;
       engines: { node: string };
@@ -113,29 +114,31 @@ describe("installed standalone CLI", () => {
     };
     const lockfile = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8")) as {
       name: string;
-      packages: Record<string, { name?: string; version?: string; bin?: Record<string, string>; engines?: { node: string } }>;
+      packages: Record<string, { name?: string; version?: string; bin?: Record<string, string>; engines?: { node: string }; license?: string }>;
     };
     const lockRoot = lockfile.packages[""]!;
 
     expect(rootManifest).toMatchObject({
       name: "idea-finder",
       version: EXPECTED_RELEASE_VERSION,
+      private: true,
+      license: "UNLICENSED",
       bin: { "idea-finder": EXPECTED_BIN },
       engines: EXPECTED_ENGINES,
-      publishConfig: { access: "public" },
       repository: { type: "git", url: "git+https://github.com/tt-a1i/idea_finder.git" },
       homepage: "https://github.com/tt-a1i/idea_finder#readme",
       bugs: { url: "https://github.com/tt-a1i/idea_finder/issues" },
     });
+    expect(rootManifest).not.toHaveProperty("publishConfig");
     expect(rootManifest.description).toMatch(/local-first/i);
     expect(rootManifest.description).toMatch(/Agent-native/i);
     expect(rootManifest.description).toMatch(/demand/i);
     expect(rootManifest.keywords).toEqual(expect.arrayContaining(["cli", "agent-skill", "local-first"]));
-    expect(rootManifest.license).toBeUndefined();
     expect(lockfile.name).toBe(rootManifest.name);
     expect(lockRoot).toMatchObject({
       name: rootManifest.name,
       version: EXPECTED_RELEASE_VERSION,
+      license: "UNLICENSED",
       bin: { "idea-finder": EXPECTED_BIN },
       engines: EXPECTED_ENGINES,
     });
@@ -143,6 +146,8 @@ describe("installed standalone CLI", () => {
     expect(packedManifest).toMatchObject({
       name: "idea-finder",
       version: EXPECTED_RELEASE_VERSION,
+      private: true,
+      license: "UNLICENSED",
       bin: { "idea-finder": EXPECTED_BIN },
       engines: EXPECTED_ENGINES,
       description: rootManifest.description,
@@ -150,9 +155,8 @@ describe("installed standalone CLI", () => {
       homepage: rootManifest.homepage,
       bugs: rootManifest.bugs,
       keywords: rootManifest.keywords,
-      publishConfig: { access: "public" },
     });
-    expect(packedManifest).not.toHaveProperty("license");
+    expect(packedManifest).not.toHaveProperty("publishConfig");
     expect(packedManifest.dependencies).toBeUndefined();
   });
 

@@ -1,7 +1,8 @@
 {
   "name": "idea-finder",
   "version": "0.1.0-rc.1",
-  "private": false,
+  "private": true,
+  "license": "UNLICENSED",
   "description": "Local-first, Agent-native Broad Demand Discovery CLI and companion Skill with evidence-backed provenance.",
   "type": "module",
   "bin": {
@@ -50,9 +51,6 @@
     "evidence",
     "provenance"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "devDependencies": {
     "@types/node": "^22.15.30",
     "esbuild": "0.28.1",

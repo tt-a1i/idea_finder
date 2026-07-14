@@ -2,7 +2,7 @@
 
 Local-first, Agent-native Broad Demand Discovery CLI + Skill.
 
-Current technical package candidate: **`0.1.0-rc.1`**. This is not an npm registry release, git tag, or GitHub Release. Formal publish is still blocked by an unresolved project **license** (no `LICENSE` / `license` field yet), plus push, tag, and registry publish steps that have not happened. `publishConfig.access` is set to `public` only so a future licensed publish is not private by default — it does not mean the package is published.
+This is a **local-only personal tool**. Local artifact version: **`0.1.0-rc.1`** (not a public release). Install only by packing this repository and installing the generated tarball — there is no public npm registry install path. The root package sets `private: true` so npm refuses accidental publish, and `license: "UNLICENSED"` so no license is granted to others. There is no plan for npm publish, dist-tag, git release tag, or GitHub Release. Changing GitHub repository visibility is a separate remote decision and is not part of this packaging setup.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ idea-finder research run agent-workflows --workspace "$WORKSPACE" --json
 idea-finder export agent-workflows --workspace "$WORKSPACE" --json
 ```
 
-Registry install (`npm install -g idea-finder`) is **not available yet** — use the local pack workflow above until a licensed publish lands. Do not treat `0.1.0-rc.1` as a released npm version. A future prerelease publish must use an explicit dist-tag (for example `npm publish --tag rc`); npm 11 rejects untagged prerelease publishes.
+Do **not** run `npm install -g idea-finder` from the registry — that path is not supported. Use the local pack workflow above.
 
 Natural-language Skill path: `topic → plan propose → human confirmation → broad research → inspect → pain map`.
 ## Scripts

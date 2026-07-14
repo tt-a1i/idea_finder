@@ -2,7 +2,7 @@
 
 ## Prerequisites and clean installation
 
-Require Node.js 22.5+. The current technical package candidate is `0.1.0-rc.1`; it is not yet published to the npm registry. Registry install and license approval remain unfinished publish blockers. From this repository checkout, build and pack the standalone artifact:
+Require Node.js 22.5+. `idea-finder` is a local-only personal tool. Local artifact version `0.1.0-rc.1` is not a public release. Install only by packing this repository and installing the generated tarball — there is no public npm registry install path. The root package sets `private: true` to prevent accidental npm publish, and `license: "UNLICENSED"` so no license is granted to others. There is no plan for npm publish, dist-tag, git release tag, or GitHub Release. From this repository checkout, build and pack the standalone artifact:
 
 ```bash
 npm install
