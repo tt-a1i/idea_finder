@@ -85,12 +85,32 @@ function cloneClusterSeeds(seeds: readonly PainClusterSeed[]): PainClusterSeed[]
   return seeds.map((cluster) => ({ ...cluster }));
 }
 
+/** Count baseline ids for a harvested checkpoint. Prefer knownClusterIds (identity may diverge). */
 function checkpointClusterBaseline(checkpoint: ResearchLedger["lastCheckpoint"]): readonly string[] | undefined {
   if (checkpoint?.phase !== "harvested") return undefined;
+  if (checkpoint.knownClusterIds !== undefined) return checkpoint.knownClusterIds;
   if (checkpoint.knownClusters !== undefined) {
     return checkpoint.knownClusters.map((cluster) => cluster.id);
   }
-  return checkpoint.knownClusterIds;
+  return undefined;
+}
+
+/** Fixed count-baseline seeds for a harvested resume; never take identity seeds as the baseline. */
+function restoreRoundBaselineSeedsForHarvestResume(
+  checkpoint: ResearchLedger["lastCheckpoint"],
+  existingRoundSummary: ResearchRoundSummary | undefined,
+): PainClusterSeed[] {
+  if (existingRoundSummary !== undefined) {
+    return restoreRoundBaselineFromSummary(existingRoundSummary).seeds;
+  }
+  // First harvest of this logical round: pre-harvest identity equals the count baseline.
+  if (checkpoint?.knownClusterIds !== undefined && checkpoint.knownClusterIds.length === 0) {
+    return [];
+  }
+  if (checkpoint?.knownClusters !== undefined) {
+    return cloneClusterSeeds(checkpoint.knownClusters);
+  }
+  return [];
 }
 
 function restoreKnownClustersFromCheckpoint(
@@ -123,10 +143,23 @@ function restoreRoundBaselineFromSummary(summary: ResearchRoundSummary): {
     }
     throw new Error(
       "round summary has clusterBaselineIds but no clusterBaselineSeeds; "
-      + "cannot restore cluster identity after ID drift. Re-run research to regenerate ledgers with clusterBaselineSeeds.",
+      + "cannot restore the fixed newClusterCount baseline after ID drift. "
+      + "Re-run research to regenerate ledgers with clusterBaselineSeeds.",
     );
   }
   throw new Error("round summary missing cluster baseline");
+}
+
+/** Same-round identity must come from the latest attempt result, never the fixed count baseline. */
+function restoreRoundResultSeedsFromSummary(summary: ResearchRoundSummary): PainClusterSeed[] {
+  if (summary.clusterResultSeeds !== undefined) {
+    return cloneClusterSeeds(summary.clusterResultSeeds);
+  }
+  throw new Error(
+    `round ${summary.round} summary missing clusterResultSeeds; `
+    + "cannot restore cluster identity for same-round retry after ID drift. "
+    + "Re-run research to regenerate ledgers with clusterResultSeeds.",
+  );
 }
 
 /** Current unresolved failures only — historical attempt incompleteness must not permanently pollute. */
@@ -229,8 +262,8 @@ export async function runBroadResearchRounds(input: {
   let roundClusterBaselineIds: Set<string> | null = harvestedBaseline !== undefined
     ? new Set(harvestedBaseline)
     : null;
-  let roundClusterBaselineSeeds: PainClusterSeed[] | null = lastCheckpoint?.phase === "harvested" && lastCheckpoint.knownClusters !== undefined
-    ? cloneClusterSeeds(lastCheckpoint.knownClusters)
+  let roundClusterBaselineSeeds: PainClusterSeed[] | null = lastCheckpoint?.phase === "harvested"
+    ? restoreRoundBaselineSeedsForHarvestResume(lastCheckpoint, existingRoundSummary)
     : null;
 
   if (roundClusterBaselineIds === null && existingRoundSummary !== undefined) {
@@ -239,11 +272,17 @@ export async function runBroadResearchRounds(input: {
     roundClusterBaselineSeeds = restored.seeds;
   }
 
-  const priorRoundResultSeeds = roundClusterBaselineSeeds === null
+  // Same-round resume (round_complete): identity comes from latest result seeds.
+  // Harvested checkpoint resume keeps using checkpoint knownClusters instead.
+  const sameRoundResultSeeds = existingRoundSummary !== undefined && lastCheckpoint?.phase !== "harvested"
+    ? restoreRoundResultSeedsFromSummary(existingRoundSummary)
+    : null;
+
+  const priorRoundResultSeeds = sameRoundResultSeeds === null && roundClusterBaselineSeeds === null
     ? restorePriorRoundResultSeeds(rounds, roundNumber)
     : null;
 
-  const identityAnchor = roundClusterBaselineSeeds
+  const identityAnchor = sameRoundResultSeeds
     ?? priorRoundResultSeeds
     ?? (lastCheckpoint?.phase === "harvested"
       ? restoreKnownClustersFromCheckpoint(lastCheckpoint, [])
@@ -258,8 +297,8 @@ export async function runBroadResearchRounds(input: {
   });
   let knownClusters = lastCheckpoint?.phase === "harvested"
     ? restoreKnownClustersFromCheckpoint(lastCheckpoint, clustersAtStart)
-    : roundClusterBaselineSeeds !== null
-      ? cloneClusterSeeds(roundClusterBaselineSeeds)
+    : sameRoundResultSeeds !== null
+      ? cloneClusterSeeds(sameRoundResultSeeds)
       : priorRoundResultSeeds !== null
         ? cloneClusterSeeds(priorRoundResultSeeds)
         : clustersAtStart;
@@ -422,9 +461,10 @@ export async function runBroadResearchRounds(input: {
       knownClusters = restoreKnownClustersFromCheckpoint(lastCheckpoint, clustersAtStart);
       knownClusterIds = new Set(knownClusters.map((cluster) => cluster.id));
       roundClusterBaselineIds = new Set(clusterBaseline);
-      roundClusterBaselineSeeds = lastCheckpoint.knownClusters !== undefined
-        ? cloneClusterSeeds(lastCheckpoint.knownClusters)
-        : [];
+      roundClusterBaselineSeeds = restoreRoundBaselineSeedsForHarvestResume(
+        lastCheckpoint,
+        rounds.find((round) => round.round === roundNumber),
+      );
       stopReason = await finishIntelligenceAndRound({
         queryIds: queryIds.length > 0 ? queryIds : (rounds.find((round) => round.round === roundNumber)?.queryIds ?? []),
         docsBefore,
@@ -494,12 +534,12 @@ export async function runBroadResearchRounds(input: {
     const allStatuses = sourceStatusesNow();
     queries = applyQueryExecutionWriteback(queries, allStatuses, executedIds);
     executedQueryCount += selection.toRun.length;
-    // Checkpoint A: query writeback + harvest baselines before intelligence so crash mid-intel is resumable.
+    // Checkpoint A: count baseline ids stay fixed; knownClusters stores pre-intel identity.
     persistAtomic("continue", "harvested", roundNumber, {
       docsBefore,
       evidenceBefore,
       knownClusterIds: [...roundClusterBaselineIds],
-      knownClusters: (roundClusterBaselineSeeds ?? knownClusters).map((cluster) => ({ ...cluster })),
+      knownClusters: knownClusters.map((cluster) => ({ ...cluster })),
     });
 
     stopReason = await finishIntelligenceAndRound({

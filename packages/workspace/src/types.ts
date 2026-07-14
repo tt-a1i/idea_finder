@@ -33,9 +33,9 @@ export interface ResearchRoundSummary {
   readonly newEvidenceCount: number;
   readonly newClusterCount: number;
   readonly coverageIncomplete: boolean;
-  /** Cluster ids known before this logical round's first harvest attempt. */
+  /** Cluster ids known before this logical round's first harvest attempt; fixed count baseline for newClusterCount. */
   readonly clusterBaselineIds?: readonly string[];
-  /** Full cluster seeds before this logical round's first harvest attempt; restores identity on cross-invocation retry. */
+  /** Full cluster seeds before this logical round's first harvest attempt; fixed count baseline only (not an identity anchor). */
   readonly clusterBaselineSeeds?: readonly {
     readonly id: string;
     readonly painStatement: string;
@@ -45,7 +45,10 @@ export interface ResearchRoundSummary {
     readonly independentSourceCount: number;
     readonly languages: readonly string[];
   }[];
-  /** Final cluster seeds after this logical round completes; anchors identity for the next round across invocations. */
+  /**
+   * Final cluster seeds after the latest attempt of this logical round.
+   * Anchors identity for same-round cross-invocation retry and for the next round.
+   */
   readonly clusterResultSeeds?: readonly {
     readonly id: string;
     readonly painStatement: string;
@@ -67,9 +70,9 @@ export interface ResearchLedger {
     readonly docsBefore?: number;
     /** Evidence count before this round's harvest; required when phase is harvested. */
     readonly evidenceBefore?: number;
-    /** Cluster ids known before this round's harvest; required when phase is harvested. */
+    /** Fixed newClusterCount baseline ids for this logical round; required when phase is harvested. */
     readonly knownClusterIds?: readonly string[];
-    /** Full cluster seeds before this round's harvest; restores identity on resume. */
+    /** Pre-intelligence identity seeds for this harvest attempt; restores identity on resume. */
     readonly knownClusters?: readonly {
       readonly id: string;
       readonly painStatement: string;

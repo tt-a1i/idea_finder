@@ -1448,7 +1448,11 @@ describe("runBroadResearchRounds", () => {
 
       const round2Summary = ledgerAfterRound2.rounds.find((round) => round.round === 2);
       expect(round2Summary?.clusterBaselineSeeds?.length).toBeGreaterThan(0);
+      expect(round2Summary?.clusterResultSeeds?.length).toBeGreaterThan(0);
       expect(round2Summary?.newClusterCount).toBe(0);
+      const round2ResultIdsBeforeRetry = (round2Summary?.clusterResultSeeds ?? [])
+        .map((cluster) => cluster.id)
+        .sort();
 
       const planBeforeRetry = storage.searchPlans.get(confirmed.id) as typeof confirmed;
       const retryPlan = {
@@ -1471,16 +1475,23 @@ describe("runBroadResearchRounds", () => {
         existingLedger: ledgerAfterRound2,
       });
 
-      const clusterIds = clusterPainSignals({
-        signals: storage.rawSignals.listByRun(runId),
-        independenceGroupByDocumentId: new Map(),
-        previousClusters: round2Summary?.clusterBaselineSeeds,
-      }).map((cluster) => cluster.id);
+      const round2AfterRetry = afterRetry.ledger.rounds.find((round) => round.round === 2);
+      const resultIdsAfterRetry = (round2AfterRetry?.clusterResultSeeds ?? [])
+        .map((cluster) => cluster.id)
+        .sort();
       storage.close();
       return {
-        round2AfterRetry: afterRetry.ledger.rounds.find((round) => round.round === 2),
+        round2AfterRetry,
         stopReason: afterRetry.ledger.stopReason,
-        clusterIds,
+        coverageIncomplete: afterRetry.coverageIncomplete,
+        resultIdsAfterRetry,
+        round2ResultIdsBeforeRetry,
+        baselineIdsAfterRetry: (round2AfterRetry?.clusterBaselineSeeds ?? [])
+          .map((cluster) => cluster.id)
+          .sort(),
+        baselineIdsBeforeRetry: (round2Summary?.clusterBaselineSeeds ?? [])
+          .map((cluster) => cluster.id)
+          .sort(),
       };
     }
 
@@ -1489,7 +1500,391 @@ describe("runBroadResearchRounds", () => {
     expect(crossInvocation.round2AfterRetry?.newClusterCount).toBe(continuous.round2AfterRetry?.newClusterCount);
     expect(crossInvocation.round2AfterRetry?.newClusterCount).toBe(0);
     expect(crossInvocation.stopReason).toBe(continuous.stopReason);
-    expect(crossInvocation.clusterIds.sort()).toEqual(continuous.clusterIds.sort());
+    expect(crossInvocation.coverageIncomplete).toBe(continuous.coverageIncomplete);
+    expect(crossInvocation.resultIdsAfterRetry).toEqual(continuous.resultIdsAfterRetry);
+    expect(crossInvocation.resultIdsAfterRetry).toEqual(crossInvocation.round2ResultIdsBeforeRetry);
+    expect(continuous.resultIdsAfterRetry).toEqual(continuous.round2ResultIdsBeforeRetry);
+    expect(crossInvocation.baselineIdsAfterRetry).toEqual(crossInvocation.baselineIdsBeforeRetry);
+    expect(continuous.baselineIdsAfterRetry).toEqual(continuous.baselineIdsBeforeRetry);
+  });
+
+  it("empty-baseline same-round retry keeps fresh cluster id when lexicographically smaller similar signal joins", async () => {
+    const priorPain = "painful handoff workflow every week between coding agents";
+    const similarPain = "painful handoff workflow between agents";
+
+    async function runFlow(mode: "continuous" | "cross-invocation") {
+      const root = await mkdtemp(path.join(os.tmpdir(), `idea-finder-empty-baseline-${mode}-`));
+      leftovers.push(root);
+      const dataDir = path.join(root, "pipeline");
+      const storage = openLocalStorage({ dataDir });
+      const proposed = buildProposedSearchPlan({
+        topic: "agent handoff pain",
+        budgets: { queries: 8, documents: 50, rounds: 10 },
+        sourceFamilies: ["hn", "stack_exchange"],
+      });
+      const hnQuery = buildBroadQueryVariants(proposed).find((query) => query.source === "hn");
+      expect(hnQuery).toBeTruthy();
+      const round1Pending = [{
+        ...hnQuery!,
+        round: 1,
+        status: "pending" as const,
+        itemCount: 0,
+      }];
+      const confirmed = confirmSearchPlanEntity({
+        ...proposed,
+        queries: round1Pending,
+        budgets: { queries: 8, documents: 50, rounds: 10 },
+      });
+      const brief: HuntingBrief = {
+        id: asId(`task_empty_baseline_${mode}`),
+        slug: `empty_baseline_${mode}`,
+        title: "agent handoff pain",
+        description: "test",
+        lenses: ["pain"],
+        sourcesEnabled: ["hn", "stack_exchange"],
+        successCriteria: "s",
+        createdAt: "2026-07-11T00:00:00.000Z",
+        searchPlanId: confirmed.id,
+        searchPlanVersion: confirmed.version,
+        queryPlan: { harvestMode: "l0" },
+      };
+      storage.searchPlans.save(confirmed as { readonly id: string });
+      storage.huntingBriefs.save(brief);
+      const runId = asId(`run_empty_baseline_${mode}`);
+      storage.researchRuns.save({
+        id: runId,
+        huntingTaskId: brief.id,
+        status: "running",
+        startedAt: "2026-07-11T00:00:00.000Z",
+        completedAt: null,
+        configHash: "cfg_test",
+        errorMessage: null,
+      });
+
+      // Attempt 1: HN story succeeds (doc_zzz_hn → larger signal id, long pain) while
+      // the HN comment leg fails. Retry recovers the comment leg with doc_hn_a
+      // (lexicographically smaller signal id, similar pain). Without result-seed
+      // identity, fresh reclustering drifts the cluster id.
+      let commentFailing = true;
+      const makeDeps = () => {
+        const hn: SourceConnector = {
+          platform: "hn",
+          async healthcheck() { return { ok: true }; },
+          async *search(query) {
+            const qid = query.queryId ?? "";
+            if (qid.endsWith("__comment")) {
+              if (commentFailing) throw new Error("forced hn comment failure on first attempt");
+              yield {
+                id: asId("doc_hn_a"),
+                huntingTaskId: brief.id,
+                sourceTier: "public_api",
+                platform: "hn",
+                externalId: "hn_a",
+                url: "https://example.test/hn/a",
+                fetchedAt: "2026-07-11T00:00:00.000Z",
+                fetchMethod: "api",
+                fetchAgentRunId: null,
+                contentType: "post",
+                rawBody: similarPain,
+                retentionClass: "research",
+                legalBasis: "public",
+              } as never;
+              return;
+            }
+            yield {
+              id: asId("doc_zzz_hn"),
+              huntingTaskId: brief.id,
+              sourceTier: "public_api",
+              platform: "hn",
+              externalId: "zzz_hn",
+              url: "https://example.test/hn/zzz",
+              fetchedAt: "2026-07-11T00:00:00.000Z",
+              fetchMethod: "api",
+              fetchAgentRunId: null,
+              contentType: "post",
+              rawBody: priorPain,
+              retentionClass: "research",
+              legalBasis: "public",
+            } as never;
+          },
+          async fetch() { throw new Error("not used"); },
+        };
+        const se: SourceConnector = {
+          platform: "stack_exchange",
+          async healthcheck() { return { ok: true }; },
+          async *search() { throw new Error("SE unused in this scenario"); },
+          async fetch() { throw new Error("not used"); },
+        };
+        return {
+          storage,
+          harvest: createHarvestPipeline({
+            connectors: [hn, se],
+            repository: createStorageHarvestRepository(storage),
+          }),
+          intelligence: createIntelligencePipeline({
+            documents: storage.rawDocuments,
+            chunks: storage.chunks,
+            signals: storage.rawSignals,
+            evidence: storage.evidenceItems,
+            drafts: storage.opportunityDrafts,
+          }),
+          queryTermsFromBrief,
+        };
+      };
+
+      const firstDeps = makeDeps();
+      const afterFirst = await runBroadResearchRounds({
+        deps: firstDeps,
+        brief,
+        runId,
+        plan: confirmed,
+        execution: "new",
+        effectiveConfig: { mode: "test" },
+      });
+      const round1AfterFirst = afterFirst.ledger.rounds.find((round) => round.round === 1);
+      expect(round1AfterFirst?.clusterBaselineSeeds).toEqual([]);
+      expect(round1AfterFirst?.clusterBaselineIds).toEqual([]);
+      expect(round1AfterFirst?.newClusterCount).toBeGreaterThan(0);
+      expect(round1AfterFirst?.clusterResultSeeds?.length).toBeGreaterThan(0);
+      const firstAttemptClusterIds = (round1AfterFirst?.clusterResultSeeds ?? [])
+        .map((cluster) => cluster.id)
+        .sort();
+      const firstAttemptEvidenceCount = (round1AfterFirst?.clusterResultSeeds ?? [])
+        .reduce((sum, cluster) => sum + cluster.evidenceIds.length, 0);
+      const firstAttemptDocumentCount = (round1AfterFirst?.clusterResultSeeds ?? [])
+        .reduce((sum, cluster) => sum + cluster.documentIds.length, 0);
+
+      const planAfterFirst = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+      expect(planAfterFirst.queries.some((query) => query.status === "partial")).toBe(true);
+      commentFailing = false;
+
+      // continuous keeps the same deps object; cross-invocation rebuilds deps and
+      // only resumes through the persisted ledger.
+      const resumeDeps = mode === "cross-invocation" ? makeDeps() : firstDeps;
+      const afterRetry = await runBroadResearchRounds({
+        deps: resumeDeps,
+        brief,
+        runId,
+        plan: planAfterFirst,
+        execution: "retried",
+        effectiveConfig: { mode: "test" },
+        existingLedger: afterFirst.ledger,
+      });
+
+      const round1AfterRetry = afterRetry.ledger.rounds.find((round) => round.round === 1);
+      const resultIdsAfterRetry = (round1AfterRetry?.clusterResultSeeds ?? [])
+        .map((cluster) => cluster.id)
+        .sort();
+      const resultEvidenceCount = (round1AfterRetry?.clusterResultSeeds ?? [])
+        .reduce((sum, cluster) => sum + cluster.evidenceIds.length, 0);
+      const resultDocumentCount = (round1AfterRetry?.clusterResultSeeds ?? [])
+        .reduce((sum, cluster) => sum + cluster.documentIds.length, 0);
+      storage.close();
+      return {
+        firstAttemptClusterIds,
+        resultIdsAfterRetry,
+        newClusterCount: round1AfterRetry?.newClusterCount,
+        baselineSeeds: round1AfterRetry?.clusterBaselineSeeds,
+        baselineIds: round1AfterRetry?.clusterBaselineIds,
+        stopReason: afterRetry.ledger.stopReason,
+        coverageIncomplete: afterRetry.coverageIncomplete,
+        firstAttemptEvidenceCount,
+        firstAttemptDocumentCount,
+        resultEvidenceCount,
+        resultDocumentCount,
+        followUpTriggered: afterRetry.queries.some((query) => query.round > 1 && Boolean(query.triggerEvidenceId)),
+      };
+    }
+
+    const continuous = await runFlow("continuous");
+    const crossInvocation = await runFlow("cross-invocation");
+
+    expect(crossInvocation.resultIdsAfterRetry).toEqual(continuous.resultIdsAfterRetry);
+    expect(crossInvocation.resultIdsAfterRetry).toEqual(crossInvocation.firstAttemptClusterIds);
+    expect(continuous.resultIdsAfterRetry).toEqual(continuous.firstAttemptClusterIds);
+    expect(crossInvocation.newClusterCount).toBe(continuous.newClusterCount);
+    expect(crossInvocation.newClusterCount).toBeGreaterThan(0);
+    expect(crossInvocation.baselineSeeds).toEqual([]);
+    expect(continuous.baselineSeeds).toEqual([]);
+    expect(crossInvocation.baselineIds).toEqual([]);
+    expect(continuous.baselineIds).toEqual([]);
+    expect(crossInvocation.resultEvidenceCount).toBeGreaterThan(crossInvocation.firstAttemptEvidenceCount);
+    expect(crossInvocation.resultDocumentCount).toBeGreaterThan(crossInvocation.firstAttemptDocumentCount);
+    expect(continuous.resultEvidenceCount).toBeGreaterThan(continuous.firstAttemptEvidenceCount);
+    expect(continuous.resultDocumentCount).toBeGreaterThan(continuous.firstAttemptDocumentCount);
+    expect(crossInvocation.stopReason).toBe(continuous.stopReason);
+    expect(crossInvocation.coverageIncomplete).toBe(continuous.coverageIncomplete);
+    expect(crossInvocation.followUpTriggered).toBe(continuous.followUpTriggered);
+  });
+
+  it("empty-baseline same-round harvest crash/resume keeps identity from checkpoint knownClusters", async () => {
+    const priorPain = "painful handoff workflow every week between coding agents";
+    const similarPain = "painful handoff workflow between agents";
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-empty-baseline-crash-"));
+    leftovers.push(root);
+    const dataDir = path.join(root, "pipeline");
+    const storage = openLocalStorage({ dataDir });
+    const proposed = buildProposedSearchPlan({
+      topic: "agent handoff pain",
+      budgets: { queries: 8, documents: 50, rounds: 10 },
+      sourceFamilies: ["hn", "stack_exchange"],
+    });
+    const hnQuery = buildBroadQueryVariants(proposed).find((query) => query.source === "hn");
+    expect(hnQuery).toBeTruthy();
+    const confirmed = confirmSearchPlanEntity({
+      ...proposed,
+      queries: [{ ...hnQuery!, round: 1, status: "pending" as const, itemCount: 0 }],
+      budgets: { queries: 8, documents: 50, rounds: 10 },
+    });
+    const brief: HuntingBrief = {
+      id: asId("task_empty_baseline_crash"),
+      slug: "empty_baseline_crash",
+      title: "agent handoff pain",
+      description: "test",
+      lenses: ["pain"],
+      sourcesEnabled: ["hn", "stack_exchange"],
+      successCriteria: "s",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      searchPlanId: confirmed.id,
+      searchPlanVersion: confirmed.version,
+      queryPlan: { harvestMode: "l0" },
+    };
+    storage.searchPlans.save(confirmed as { readonly id: string });
+    storage.huntingBriefs.save(brief);
+    const runId = asId("run_empty_baseline_crash");
+    storage.researchRuns.save({
+      id: runId,
+      huntingTaskId: brief.id,
+      status: "running",
+      startedAt: "2026-07-11T00:00:00.000Z",
+      completedAt: null,
+      configHash: "cfg_test",
+      errorMessage: null,
+    });
+
+    let commentFailing = true;
+    let crashRetryIntel = false;
+    const hn: SourceConnector = {
+      platform: "hn",
+      async healthcheck() { return { ok: true }; },
+      async *search(query) {
+        const qid = query.queryId ?? "";
+        if (qid.endsWith("__comment")) {
+          if (commentFailing) throw new Error("forced hn comment failure on first attempt");
+          yield {
+            id: asId("doc_hn_a"),
+            huntingTaskId: brief.id,
+            sourceTier: "public_api",
+            platform: "hn",
+            externalId: "hn_a",
+            url: "https://example.test/hn/a",
+            fetchedAt: "2026-07-11T00:00:00.000Z",
+            fetchMethod: "api",
+            fetchAgentRunId: null,
+            contentType: "post",
+            rawBody: similarPain,
+            retentionClass: "research",
+            legalBasis: "public",
+          } as never;
+          return;
+        }
+        yield {
+          id: asId("doc_zzz_hn"),
+          huntingTaskId: brief.id,
+          sourceTier: "public_api",
+          platform: "hn",
+          externalId: "zzz_hn",
+          url: "https://example.test/hn/zzz",
+          fetchedAt: "2026-07-11T00:00:00.000Z",
+          fetchMethod: "api",
+          fetchAgentRunId: null,
+          contentType: "post",
+          rawBody: priorPain,
+          retentionClass: "research",
+          legalBasis: "public",
+        } as never;
+      },
+      async fetch() { throw new Error("not used"); },
+    };
+    const realIntel = createIntelligencePipeline({
+      documents: storage.rawDocuments,
+      chunks: storage.chunks,
+      signals: storage.rawSignals,
+      evidence: storage.evidenceItems,
+      drafts: storage.opportunityDrafts,
+    });
+    const deps = {
+      storage,
+      harvest: createHarvestPipeline({
+        connectors: [hn, {
+          platform: "stack_exchange",
+          async healthcheck() { return { ok: true }; },
+          async *search() { throw new Error("SE unused"); },
+          async fetch() { throw new Error("not used"); },
+        }],
+        repository: createStorageHarvestRepository(storage),
+      }),
+      intelligence: {
+        run: async (run: Parameters<typeof realIntel.run>[0], opts?: Parameters<typeof realIntel.run>[1]) => {
+          if (crashRetryIntel) throw new Error("intelligence crashed after retry harvest");
+          return realIntel.run(run, opts);
+        },
+      },
+      queryTermsFromBrief,
+    };
+
+    const afterFirst = await runBroadResearchRounds({
+      deps: { ...deps, intelligence: realIntel },
+      brief,
+      runId,
+      plan: confirmed,
+      execution: "new",
+      effectiveConfig: { mode: "test" },
+    });
+    const firstIds = (afterFirst.ledger.rounds.find((round) => round.round === 1)?.clusterResultSeeds ?? [])
+      .map((cluster) => cluster.id)
+      .sort();
+    expect(firstIds.length).toBeGreaterThan(0);
+
+    const planAfterFirst = storage.searchPlans.get(confirmed.id) as typeof confirmed;
+    commentFailing = false;
+    crashRetryIntel = true;
+    await expect(runBroadResearchRounds({
+      deps,
+      brief,
+      runId,
+      plan: planAfterFirst,
+      execution: "retried",
+      effectiveConfig: { mode: "test" },
+      existingLedger: afterFirst.ledger,
+    })).rejects.toThrow(/intelligence crashed after retry harvest/i);
+
+    const midConfig = storage.researchRunConfigs.get(runId) as {
+      researchLedger?: {
+        lastCheckpoint?: { phase?: string; knownClusterIds?: string[]; knownClusters?: { id: string }[] };
+        rounds?: { round: number; clusterBaselineSeeds?: unknown[]; clusterResultSeeds?: { id: string }[] }[];
+      };
+    } | null;
+    expect(midConfig?.researchLedger?.lastCheckpoint?.phase).toBe("harvested");
+    expect(midConfig?.researchLedger?.lastCheckpoint?.knownClusterIds).toEqual([]);
+    expect((midConfig?.researchLedger?.lastCheckpoint?.knownClusters ?? []).map((cluster) => cluster.id).sort())
+      .toEqual(firstIds);
+
+    crashRetryIntel = false;
+    const afterResume = await runBroadResearchRounds({
+      deps: { ...deps, intelligence: realIntel },
+      brief,
+      runId,
+      plan: storage.searchPlans.get(confirmed.id) as typeof confirmed,
+      execution: "resumed",
+      effectiveConfig: { mode: "test" },
+      existingLedger: midConfig?.researchLedger as never,
+    });
+    const resumedRound = afterResume.ledger.rounds.find((round) => round.round === 1);
+    expect(resumedRound?.clusterBaselineSeeds).toEqual([]);
+    expect(resumedRound?.newClusterCount).toBeGreaterThan(0);
+    expect((resumedRound?.clusterResultSeeds ?? []).map((cluster) => cluster.id).sort()).toEqual(firstIds);
+    storage.close();
   });
 
   it("reaches saturated stop reason with round budget headroom, not budget exhaustion", async () => {
@@ -1894,6 +2289,154 @@ describe("runBroadResearchRounds", () => {
       effectiveConfig: { mode: "test" },
       existingLedger: ledger,
     })).rejects.toThrow(/clusterBaselineIds but no clusterBaselineSeeds/i);
+    storage.close();
+  });
+
+  it("fails closed when same-round summary lacks clusterResultSeeds for identity restore", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-summary-missing-result-"));
+    leftovers.push(root);
+    const { storage, confirmed, brief, runId } = await setup(root, 1);
+    const plan = {
+      ...confirmed,
+      queries: confirmed.queries.map((query) => ({
+        ...query,
+        round: 1,
+        status: "partial" as const,
+        error: "retry me",
+      })),
+    };
+    storage.searchPlans.save(plan as { readonly id: string });
+    const ledger = {
+      rounds: [{
+        round: 1,
+        queryIds: plan.queries.map((query) => query.id),
+        newDocumentCount: 1,
+        newEvidenceCount: 1,
+        newClusterCount: 1,
+        coverageIncomplete: true,
+        clusterBaselineIds: [],
+        clusterBaselineSeeds: [],
+      }],
+      stopReason: "continue" as const,
+      lastCheckpoint: { round: 1, phase: "round_complete" as const },
+    };
+    const deps = {
+      storage,
+      harvest: createHarvestPipeline({
+        connectors: [{
+          platform: "hn",
+          async healthcheck() { return { ok: true }; },
+          async *search() { yield {} as never; },
+          async fetch() { throw new Error("not used"); },
+        }, {
+          platform: "stack_exchange",
+          async healthcheck() { return { ok: true }; },
+          async *search() { yield {} as never; },
+          async fetch() { throw new Error("not used"); },
+        }],
+        repository: createStorageHarvestRepository(storage),
+      }),
+      intelligence: createIntelligencePipeline({
+        documents: storage.rawDocuments,
+        chunks: storage.chunks,
+        signals: storage.rawSignals,
+        evidence: storage.evidenceItems,
+        drafts: storage.opportunityDrafts,
+      }),
+      queryTermsFromBrief,
+    };
+    await expect(runBroadResearchRounds({
+      deps,
+      brief,
+      runId,
+      plan,
+      execution: "retried",
+      effectiveConfig: { mode: "test" },
+      existingLedger: ledger,
+    })).rejects.toThrow(/missing clusterResultSeeds/i);
+    storage.close();
+  });
+
+  it("restores same-round identity when clusterResultSeeds is an explicit empty array", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "idea-finder-summary-empty-result-"));
+    leftovers.push(root);
+    const { storage, confirmed, brief, runId } = await setup(root, 1);
+    const plan = {
+      ...confirmed,
+      queries: confirmed.queries.map((query) => ({
+        ...query,
+        round: 1,
+        status: "partial" as const,
+        error: "retry me",
+      })),
+    };
+    storage.searchPlans.save(plan as { readonly id: string });
+    const ledger = {
+      rounds: [{
+        round: 1,
+        queryIds: plan.queries.map((query) => query.id),
+        newDocumentCount: 0,
+        newEvidenceCount: 0,
+        newClusterCount: 0,
+        coverageIncomplete: true,
+        clusterBaselineIds: [],
+        clusterBaselineSeeds: [],
+        clusterResultSeeds: [],
+      }],
+      stopReason: "continue" as const,
+      lastCheckpoint: { round: 1, phase: "round_complete" as const },
+    };
+    const painBody = "painful handoff workflow every week between coding agents";
+    const connector = (platform: string): SourceConnector => ({
+      platform,
+      async healthcheck() { return { ok: true }; },
+      async *search() {
+        yield {
+          id: asId(`doc_${platform}_empty_result`),
+          huntingTaskId: brief.id,
+          sourceTier: "public_api",
+          platform,
+          externalId: `${platform}_empty_result`,
+          url: `https://example.test/${platform}/empty_result`,
+          fetchedAt: "2026-07-11T00:00:00.000Z",
+          fetchMethod: "api",
+          fetchAgentRunId: null,
+          contentType: "post",
+          rawBody: painBody,
+          retentionClass: "research",
+          legalBasis: "public",
+        } as never;
+      },
+      async fetch() { throw new Error("not used"); },
+    });
+    const deps = {
+      storage,
+      harvest: createHarvestPipeline({
+        connectors: [connector("hn"), connector("stack_exchange")],
+        repository: createStorageHarvestRepository(storage),
+      }),
+      intelligence: createIntelligencePipeline({
+        documents: storage.rawDocuments,
+        chunks: storage.chunks,
+        signals: storage.rawSignals,
+        evidence: storage.evidenceItems,
+        drafts: storage.opportunityDrafts,
+      }),
+      queryTermsFromBrief,
+    };
+    const result = await runBroadResearchRounds({
+      deps,
+      brief,
+      runId,
+      plan,
+      execution: "retried",
+      effectiveConfig: { mode: "test" },
+      existingLedger: ledger,
+    });
+    const round1 = result.ledger.rounds.find((round) => round.round === 1);
+    expect(round1?.clusterBaselineSeeds).toEqual([]);
+    expect(round1?.newClusterCount).toBeGreaterThan(0);
+    expect(round1?.clusterResultSeeds?.length).toBeGreaterThan(0);
     storage.close();
   });
 
