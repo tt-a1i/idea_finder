@@ -1,10 +1,11 @@
 {
   "name": "idea-finder",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "private": false,
+  "description": "Local-first, Agent-native Broad Demand Discovery CLI and companion Skill with evidence-backed provenance.",
   "type": "module",
   "bin": {
-    "idea-finder": "./bin/idea-finder.js"
+    "idea-finder": "bin/idea-finder.js"
   },
   "files": [
     "bin/idea-finder.js",
@@ -32,6 +33,25 @@
     "web:dev": "npm run dev -w @idea-finder/web",
     "web:build": "npm run build -w @idea-finder/web",
     "web:typecheck": "npm run typecheck -w @idea-finder/web"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tt-a1i/idea_finder.git"
+  },
+  "homepage": "https://github.com/tt-a1i/idea_finder#readme",
+  "bugs": {
+    "url": "https://github.com/tt-a1i/idea_finder/issues"
+  },
+  "keywords": [
+    "cli",
+    "agent-skill",
+    "demand-research",
+    "local-first",
+    "evidence",
+    "provenance"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",

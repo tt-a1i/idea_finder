@@ -4,26 +4,43 @@ Command-line workflow for the personal demand workspace (Wave 2 vertical slice).
 
 ## Install the standalone CLI
 
+Requires Node.js 22.5+. The root package technical candidate is `0.1.0-rc.1`.
+It has not been published to the npm registry, and there is no release tag or
+GitHub Release yet. Formal publish remains blocked until a project license is
+approved (this repository does not yet ship a `LICENSE` file or `license`
+field), then push, tag, and registry publish can follow. Root
+`publishConfig.access` is `public` so a future licensed publish would be public
+by default; it is not evidence that a registry release exists.
+
+**From this repository** (local pack/install; use the exact filename printed by
+`npm pack` so leftover tarballs cannot shadow the install):
+
 ```bash
 npm install
 npm run build
-npm pack
-npm install -g ./idea-finder-0.0.0.tgz
+TARBALL="$(npm pack --silent)"
+npm install -g "./$TARBALL"
 idea-finder workspace diagnostics --workspace "$PWD/workspace" --init --json
 ```
 
-The package also ships the companion Codex Skill. For a local clean install:
+The package also ships the companion Codex Skill. For a local clean install of
+that Skill after the same pack/install:
 
 ```bash
-npm install -g ./idea-finder-0.0.0.tgz
+TARBALL="$(npm pack --silent)"
+npm install -g "./$TARBALL"
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R "$(npm root -g)/idea-finder/skills/idea-finder" "${CODEX_HOME:-$HOME/.codex}/skills/idea-finder"
 ```
 
+Do **not** run `npm install -g idea-finder` yet — registry install only becomes
+valid after a licensed public publish. A future prerelease registry publish must
+pass an explicit dist-tag (for example `npm publish --tag rc`); npm 11 rejects
+untagged prerelease publishes.
+
 The packed root package contains a bundled `idea-finder` executable and does not
 require this repository or its npm scripts at runtime. During repository
 development, `npm link` exposes the same executable.
-
 ### Clean-install release smoke
 
 From a clean checkout, this deterministic command builds and packs the package,

@@ -2,17 +2,21 @@
 
 Local-first, Agent-native Broad Demand Discovery CLI + Skill.
 
+Current technical package candidate: **`0.1.0-rc.1`**. This is not an npm registry release, git tag, or GitHub Release. Formal publish is still blocked by an unresolved project **license** (no `LICENSE` / `license` field yet), plus push, tag, and registry publish steps that have not happened. `publishConfig.access` is set to `public` only so a future licensed publish is not private by default — it does not mean the package is published.
+
 ## Prerequisites
 
 - Node.js 22.5+
 
 ## Five-minute Agent quickstart
 
+Local pack/install from this repository (captures the exact tarball name from `npm pack`, so version bumps stay usable):
+
 ```bash
 npm install
 npm run build
-npm pack
-npm install -g ./idea-finder-0.0.0.tgz
+TARBALL="$(npm pack --silent)"
+npm install -g "./$TARBALL"
 WORKSPACE="$(pwd)/.idea-finder-workspace"
 idea-finder workspace diagnostics --workspace "$WORKSPACE" --init --json
 idea-finder plan propose --topic "agent coding workflows" --workspace "$WORKSPACE" --json
@@ -21,8 +25,9 @@ idea-finder research run agent-workflows --workspace "$WORKSPACE" --json
 idea-finder export agent-workflows --workspace "$WORKSPACE" --json
 ```
 
-Natural-language Skill path: `topic → plan propose → human confirmation → broad research → inspect → pain map`.
+Registry install (`npm install -g idea-finder`) is **not available yet** — use the local pack workflow above until a licensed publish lands. Do not treat `0.1.0-rc.1` as a released npm version. A future prerelease publish must use an explicit dist-tag (for example `npm publish --tag rc`); npm 11 rejects untagged prerelease publishes.
 
+Natural-language Skill path: `topic → plan propose → human confirmation → broad research → inspect → pain map`.
 ## Scripts
 
 | Command | Description |

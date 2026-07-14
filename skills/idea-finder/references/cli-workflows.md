@@ -2,13 +2,13 @@
 
 ## Prerequisites and clean installation
 
-Require Node.js 22.5 or newer. From a checked-out release, build and pack the standalone artifact:
+Require Node.js 22.5+. The current technical package candidate is `0.1.0-rc.1`; it is not yet published to the npm registry. Registry install and license approval remain unfinished publish blockers. From this repository checkout, build and pack the standalone artifact:
 
 ```bash
 npm install
 npm run build
-npm pack
-npm install -g ./idea-finder-0.0.0.tgz
+TARBALL="$(npm pack --silent)"
+npm install -g "./$TARBALL"
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R "$(npm root -g)/idea-finder/skills/idea-finder" "${CODEX_HOME:-$HOME/.codex}/skills/idea-finder"
 idea-finder workspace diagnostics --workspace "$HOME/Library/Application Support/idea-finder/workspace" --json
@@ -125,7 +125,7 @@ The first invocation establishes a baseline. Later invocations create distinct R
 ## Five-minute Agent quickstart
 
 ```bash
-npm pack && npm install -g ./idea-finder-0.0.0.tgz
+TARBALL="$(npm pack --silent)" && npm install -g "./$TARBALL"
 WORKSPACE="$PWD/idea-finder-workspace"
 idea-finder workspace diagnostics --workspace "$WORKSPACE" --init --json
 idea-finder plan propose --topic "agent coding workflows" --language en --language zh --workspace "$WORKSPACE" --json

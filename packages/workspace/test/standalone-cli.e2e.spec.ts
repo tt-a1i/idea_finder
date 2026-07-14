@@ -53,16 +53,23 @@ async function invokeHuman(executable: string, args: readonly string[], cwd: str
   }
 }
 
+const EXPECTED_RELEASE_VERSION = "0.1.0-rc.1";
+const EXPECTED_BIN = "bin/idea-finder.js";
+const EXPECTED_ENGINES = { node: ">=22.5" } as const;
+
 describe("installed standalone CLI", () => {
   let consumer: string;
   let executable: string;
   let workspace: string;
   let packedFiles: string[];
+  let packedFilename: string;
+  let packedManifest: Record<string, unknown>;
 
   beforeAll(async () => {
     const packDirectory = await mkdtemp(path.join(os.tmpdir(), "idea-finder-pack-"));
     const packed = await exec("npm", ["pack", "--pack-destination", packDirectory, "--json"], { cwd: repositoryRoot });
     const packResult = JSON.parse(packed.stdout) as Array<{ filename: string; files: Array<{ path: string }> }>;
+    packedFilename = packResult[0]!.filename;
     packedFiles = packResult[0]!.files.map((file) => file.path).sort();
     const tarball = path.join(packDirectory, packResult[0]!.filename);
 
@@ -71,9 +78,11 @@ describe("installed standalone CLI", () => {
     await exec("npm", ["install", "--ignore-scripts", "--no-audit", "--offline", tarball], { cwd: consumer });
     executable = path.join(consumer, "node_modules", ".bin", "idea-finder");
     workspace = path.join(consumer, "workspace");
+    packedManifest = JSON.parse(await readFile(path.join(consumer, "node_modules", "idea-finder", "package.json"), "utf8")) as Record<string, unknown>;
   }, 30_000);
 
   it("ships only the executable, package metadata, README, and companion Skill assets", () => {
+    expect(packedFilename).toBe(`idea-finder-${EXPECTED_RELEASE_VERSION}.tgz`);
     expect(packedFiles).toEqual([
       "README.md",
       "bin/idea-finder.js",
@@ -86,6 +95,65 @@ describe("installed standalone CLI", () => {
       "skills/idea-finder/references/cli-workflows.md",
     ]);
     expect(packedFiles.some((file) => /(^|\/)(?:data|\.scratch|node_modules)(\/|$)|\.env|secret|credential/i.test(file))).toBe(false);
+  });
+
+  it("locks the technical RC package and lockfile root publish contract", async () => {
+    const rootManifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8")) as {
+      name: string;
+      version: string;
+      description?: string;
+      bin: Record<string, string>;
+      engines: { node: string };
+      repository?: { type: string; url: string };
+      homepage?: string;
+      bugs?: { url: string };
+      keywords?: string[];
+      publishConfig?: { access: string };
+      license?: string;
+    };
+    const lockfile = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8")) as {
+      name: string;
+      packages: Record<string, { name?: string; version?: string; bin?: Record<string, string>; engines?: { node: string } }>;
+    };
+    const lockRoot = lockfile.packages[""]!;
+
+    expect(rootManifest).toMatchObject({
+      name: "idea-finder",
+      version: EXPECTED_RELEASE_VERSION,
+      bin: { "idea-finder": EXPECTED_BIN },
+      engines: EXPECTED_ENGINES,
+      publishConfig: { access: "public" },
+      repository: { type: "git", url: "git+https://github.com/tt-a1i/idea_finder.git" },
+      homepage: "https://github.com/tt-a1i/idea_finder#readme",
+      bugs: { url: "https://github.com/tt-a1i/idea_finder/issues" },
+    });
+    expect(rootManifest.description).toMatch(/local-first/i);
+    expect(rootManifest.description).toMatch(/Agent-native/i);
+    expect(rootManifest.description).toMatch(/demand/i);
+    expect(rootManifest.keywords).toEqual(expect.arrayContaining(["cli", "agent-skill", "local-first"]));
+    expect(rootManifest.license).toBeUndefined();
+    expect(lockfile.name).toBe(rootManifest.name);
+    expect(lockRoot).toMatchObject({
+      name: rootManifest.name,
+      version: EXPECTED_RELEASE_VERSION,
+      bin: { "idea-finder": EXPECTED_BIN },
+      engines: EXPECTED_ENGINES,
+    });
+
+    expect(packedManifest).toMatchObject({
+      name: "idea-finder",
+      version: EXPECTED_RELEASE_VERSION,
+      bin: { "idea-finder": EXPECTED_BIN },
+      engines: EXPECTED_ENGINES,
+      description: rootManifest.description,
+      repository: rootManifest.repository,
+      homepage: rootManifest.homepage,
+      bugs: rootManifest.bugs,
+      keywords: rootManifest.keywords,
+      publishConfig: { access: "public" },
+    });
+    expect(packedManifest).not.toHaveProperty("license");
+    expect(packedManifest.dependencies).toBeUndefined();
   });
 
   it("installs into a clean consumer and exposes diagnostics plus Brief create/list", async () => {
@@ -647,8 +715,9 @@ describe("installed standalone CLI", () => {
   });
 
   it("ships the bundled executable and companion Skill required at runtime", async () => {
-    const installedPackage = JSON.parse(await readFile(path.join(consumer, "node_modules", "idea-finder", "package.json"), "utf8")) as { bin: Record<string, string>; dependencies?: object };
-    expect(installedPackage.bin).toEqual({ "idea-finder": "./bin/idea-finder.js" });
+    const installedPackage = packedManifest as { bin: Record<string, string>; dependencies?: object; version: string };
+    expect(installedPackage.bin).toEqual({ "idea-finder": EXPECTED_BIN });
+    expect(installedPackage.version).toBe(EXPECTED_RELEASE_VERSION);
     expect(installedPackage.dependencies).toBeUndefined();
     const installedSkill = await readFile(path.join(consumer, "node_modules", "idea-finder", "skills", "idea-finder", "SKILL.md"), "utf8");
     expect(installedSkill).toContain("name: idea-finder");
@@ -657,9 +726,17 @@ describe("installed standalone CLI", () => {
     try {
       const missingWorkspace = path.join(unrelatedCwd, "workspace");
       const bare = await exec("idea-finder", ["workspace", "diagnostics", "--workspace", missingWorkspace, "--json"], { cwd: unrelatedCwd, env: { ...process.env, PATH: `${path.dirname(executable)}:${process.env.PATH ?? ""}` } });
+      expect(bare.stderr.trim()).toBe("");
       const envelope = JSON.parse(bare.stdout) as CliMachineEnvelope;
-      expect(envelope.status).toBe("success");
-      expect(envelope.data).toMatchObject({ exists: false, initialized: false, accessible: false });
+      expect(envelope).toMatchObject({
+        contractVersion: CLI_CONTRACT_VERSION,
+        command: "workspace diagnostics",
+        status: "success",
+        warnings: [],
+        incompleteness: { incomplete: false, reasons: [] },
+        errors: [],
+        data: { exists: false, initialized: false, accessible: false },
+      });
       expect((await import("node:fs")).existsSync(missingWorkspace)).toBe(false);
     } finally { await rm(unrelatedCwd, { recursive: true, force: true }); }
   });
